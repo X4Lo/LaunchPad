@@ -227,6 +227,14 @@ impl ConfigManager {
         })
     }
 
+    /// Returns the icons directory (next to the config file).
+    pub fn icons_dir(&self) -> PathBuf {
+        self.config_path
+            .parent()
+            .map(|p| p.join("icons"))
+            .unwrap_or_else(|| PathBuf::from("icons"))
+    }
+
     pub fn load(&self) -> Result<Config, Box<dyn std::error::Error>> {
         if !self.config_path.exists() {
             let default_config = Config::default();

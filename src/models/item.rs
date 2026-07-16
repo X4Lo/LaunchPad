@@ -49,4 +49,12 @@ impl LaunchItem {
             LaunchItem::Folder(folder) => folder.id,
         }
     }
+
+    /// Get a mutable reference to the inner GroupItem, if this is a Group.
+    pub fn as_group_mut(&mut self) -> Option<&mut crate::models::group_item::GroupItem> {
+        match self {
+            LaunchItem::Group(g) => Some(g),
+            _ => None,
+        }
+    }
 }

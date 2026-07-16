@@ -27,6 +27,7 @@ pub struct LaunchpadApp {
     pending_delete_group: Option<ItemId>,
     resizing: Option<ResizeEdge>,
     resize_start: Option<egui::Pos2>,
+    show_reorder: bool,
 }
 
 #[derive(Clone)]
@@ -65,6 +66,7 @@ impl LaunchpadApp {
             pending_delete_group: None,
             resizing: None,
             resize_start: None,
+            show_reorder: false,
         }
     }
     fn mark_dirty(&mut self) {
@@ -346,6 +348,9 @@ impl eframe::App for LaunchpadApp {
                     });
                 });
         }
+        if self.show_reorder {
+            self.render_reorder_view(ctx);
+        }
         let is_dragging = ctx.input(|i| !i.raw.hovered_files.is_empty());
         if is_dragging {
             egui::Area::new("drag_overlay".into())
@@ -387,9 +392,14 @@ impl eframe::App for LaunchpadApp {
                     self.navigate_to_root();
                 }
                 for (i, &gid) in self.nav_stack.iter().enumerate() {
-                    ui.label("▸");
-                    let (name, icon) = group_name_with_icon(&self.config, gid);
-                    let label = format!("{} {}", icon, name);
+                    ui.label(">");
+                    let (name, color) = group_name_with_icon(&self.config, gid);
+                    // Draw small colored square as type indicator
+                    let (sq, _) =
+                        ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+                    ui.painter()
+                        .rect_filled(sq, egui::CornerRadius::same(2), color);
+                    let label = name;
                     if i == self.nav_stack.len() - 1 {
                         ui.label(egui::RichText::new(label).strong());
                     } else {
@@ -418,7 +428,7 @@ impl eframe::App for LaunchpadApp {
                             .color(egui::Color32::from_gray(150))
                             .size(16.0),
                     );
-                    if ui.button("📦 Add Demo Items").clicked() {
+                    if ui.button("Add Demo Items").clicked() {
                         self.add_demo_items();
                     }
                 });
@@ -519,6 +529,23 @@ impl LaunchpadApp {
             egui::FontId::proportional(13.0),
             egui::Color32::from_gray(160),
         );
+        // Reorder button — draw up/down arrows
+        let rr = egui::Rect::from_min_size(
+            egui::pos2(bounds.right() - 100.0, bounds.top() + 4.0),
+            egui::vec2(24.0, 24.0),
+        );
+        if ui.rect_contains_pointer(rr)
+            && ui.input(|i| i.pointer.button_clicked(egui::PointerButton::Primary))
+        {
+            self.show_reorder = !self.show_reorder;
+        }
+        let reorder_color = if self.show_reorder {
+            egui::Color32::from_rgb(0xF2, 0xC9, 0x4C)
+        } else {
+            egui::Color32::from_gray(180)
+        };
+        draw_updown_arrows(&p, rr, reorder_color);
+        // Settings gear — draw a simple cog
         let sr = egui::Rect::from_min_size(
             egui::pos2(bounds.right() - 68.0, bounds.top() + 4.0),
             egui::vec2(24.0, 24.0),
@@ -528,13 +555,7 @@ impl LaunchpadApp {
         {
             self.show_settings = !self.show_settings;
         }
-        p.text(
-            sr.center(),
-            egui::Align2::CENTER_CENTER,
-            "\u{2699}",
-            egui::FontId::proportional(16.0),
-            egui::Color32::WHITE,
-        );
+        draw_cog(&p, sr, egui::Color32::WHITE);
         let cr = egui::Rect::from_min_size(
             egui::pos2(bounds.right() - 36.0, bounds.top() + 4.0),
             egui::vec2(24.0, 24.0),
@@ -696,8 +717,21 @@ impl LaunchpadApp {
                         .add_filter("Images", &["png", "ico", "jpg", "bmp"])
                         .pick_file()
                     {
-                        let _ = commands::items::set_icon(&mut self.config, id, path);
-                        self.mark_dirty();
+                        // Copy the icon to the local icons folder
+                        let icons_dir = self.config_manager.icons_dir();
+                        let _ = std::fs::create_dir_all(&icons_dir);
+                        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("png");
+                        let dest = icons_dir.join(format!("{}.{}", uuid::Uuid::new_v4(), ext));
+                        if std::fs::copy(&path, &dest).is_ok() {
+                            let _ = commands::items::set_icon(&mut self.config, id, dest);
+                            self.mark_dirty();
+                        } else {
+                            log::error!(
+                                "Failed to copy icon from {} to {}",
+                                path.display(),
+                                dest.display()
+                            );
+                        }
                     }
                     self.context_menu = None;
                 }
@@ -901,8 +935,111 @@ impl LaunchpadApp {
                     });
                 }
             }
-            // ui.allocate_space(egui::vec2(tw, ih + sp * 0.3));
             ui.allocate_space(egui::vec2(tw, sp));
+        }
+    }
+
+    /// Get mutable reference to items at the current nav level.
+    fn current_items_mut(&mut self) -> &mut Vec<LaunchItem> {
+        let gid = self.nav_stack.last().copied();
+        if let Some(gid) = gid {
+            for i in 0..self.config.items.len() {
+                if let LaunchItem::Group(ref g) = self.config.items[i] {
+                    if g.id == gid {
+                        let ptr: *mut LaunchItem = &mut self.config.items[i];
+                        return unsafe { &mut (*ptr).as_group_mut().unwrap().items };
+                    }
+                }
+            }
+        }
+        &mut self.config.items
+    }
+
+    fn render_reorder_view(&mut self, ctx: &egui::Context) {
+        let items: Vec<LaunchItem> = self.current_items().to_vec();
+        egui::Window::new("Reorder Items")
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .collapsible(false)
+            .resizable(false)
+            .default_width(320.0)
+            .show(ctx, |ui| {
+                ui.label(if self.is_at_root() {
+                    "Reorder items — Home"
+                } else {
+                    "Reorder items — Group"
+                });
+                ui.separator();
+                egui::ScrollArea::vertical()
+                    .max_height(400.0)
+                    .show(ui, |ui| {
+                        for i in 0..items.len() {
+                            let item = &items[i];
+                            let (icon_text, icon_color) = match item {
+                                LaunchItem::App(_) => {
+                                    ("A", egui::Color32::from_rgb(0x60, 0x62, 0x68))
+                                }
+                                LaunchItem::Group(_) => {
+                                    ("G", egui::Color32::from_rgb(0xF2, 0xC9, 0x4C))
+                                }
+                                LaunchItem::Folder(_) => {
+                                    ("F", egui::Color32::from_rgb(0x64, 0xB4, 0xFF))
+                                }
+                            };
+                            ui.horizontal(|ui| {
+                                // Draw a small colored label as icon indicator
+                                let (icon_rect, _) = ui.allocate_exact_size(
+                                    egui::vec2(18.0, 18.0),
+                                    egui::Sense::hover(),
+                                );
+                                ui.painter().rect_filled(
+                                    icon_rect,
+                                    egui::CornerRadius::same(3),
+                                    icon_color,
+                                );
+                                ui.painter().text(
+                                    icon_rect.center(),
+                                    egui::Align2::CENTER_CENTER,
+                                    icon_text,
+                                    egui::FontId::proportional(10.0),
+                                    egui::Color32::WHITE,
+                                );
+                                ui.label(item.title());
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if i > 0 {
+                                            let b = egui::Button::new("");
+                                            let resp = ui.add_sized(egui::vec2(24.0, 20.0), b);
+                                            draw_triangle(ui, resp.rect, true);
+                                            if resp.clicked() {
+                                                self.swap_items(i, i - 1);
+                                            }
+                                        }
+                                        if i < items.len() - 1 {
+                                            let b = egui::Button::new("");
+                                            let resp = ui.add_sized(egui::vec2(24.0, 20.0), b);
+                                            draw_triangle(ui, resp.rect, false);
+                                            if resp.clicked() {
+                                                self.swap_items(i, i + 1);
+                                            }
+                                        }
+                                    },
+                                );
+                            });
+                        }
+                    });
+                ui.add_space(8.0);
+                if ui.button("Close").clicked() {
+                    self.show_reorder = false;
+                }
+            });
+    }
+
+    fn swap_items(&mut self, a: usize, b: usize) {
+        let items = self.current_items_mut();
+        if a < items.len() && b < items.len() {
+            items.swap(a, b);
+            self.mark_dirty();
         }
     }
 }
@@ -1053,13 +1190,17 @@ fn group_name(config: &Config, gid: ItemId) -> String {
         .unwrap_or_default()
 }
 
-fn group_name_with_icon(config: &Config, gid: ItemId) -> (String, &'static str) {
+fn group_name_with_icon(config: &Config, gid: ItemId) -> (String, egui::Color32) {
     config
         .items
         .iter()
         .filter_map(|item| match item {
-            LaunchItem::Group(g) if g.id == gid => Some((g.title.clone(), "📂")),
-            LaunchItem::Folder(f) if f.id == gid => Some((f.title.clone(), "📁")),
+            LaunchItem::Group(g) if g.id == gid => {
+                Some((g.title.clone(), egui::Color32::from_rgb(0xF2, 0xC9, 0x4C)))
+            }
+            LaunchItem::Folder(f) if f.id == gid => {
+                Some((f.title.clone(), egui::Color32::from_rgb(0x64, 0xB4, 0xFF)))
+            }
             _ => None,
         })
         .next()
@@ -1095,4 +1236,90 @@ fn swatch(ui: &mut egui::Ui, label: &str, hex: &str) {
 
 fn hex_opt(s: &Option<String>) -> Option<egui::Color32> {
     crate::config::manager::Theme::parse_hex(s.as_deref()?)
+}
+
+// ─── Icon drawing helpers (no emojis) ─────────────────────
+
+/// Draw up and down arrow triangles for the reorder toggle button.
+fn draw_updown_arrows(p: &egui::Painter, rect: egui::Rect, color: egui::Color32) {
+    let cx = rect.center().x;
+    let gap = 2.0;
+    let hw = 4.0; // half-width of triangle
+                  // Up arrow
+    let up_y = rect.center().y - gap;
+    p.line_segment(
+        [egui::pos2(cx, up_y - 3.0), egui::pos2(cx, up_y + 1.0)],
+        egui::Stroke::new(1.5_f32, color),
+    );
+    p.line_segment(
+        [egui::pos2(cx - hw, up_y - 1.0), egui::pos2(cx, up_y + 1.0)],
+        egui::Stroke::new(1.5_f32, color),
+    );
+    p.line_segment(
+        [egui::pos2(cx + hw, up_y - 1.0), egui::pos2(cx, up_y + 1.0)],
+        egui::Stroke::new(1.5_f32, color),
+    );
+    // Down arrow
+    let dn_y = rect.center().y + gap;
+    p.line_segment(
+        [egui::pos2(cx, dn_y - 1.0), egui::pos2(cx, dn_y + 3.0)],
+        egui::Stroke::new(1.5_f32, color),
+    );
+    p.line_segment(
+        [egui::pos2(cx - hw, dn_y + 1.0), egui::pos2(cx, dn_y - 1.0)],
+        egui::Stroke::new(1.5_f32, color),
+    );
+    p.line_segment(
+        [egui::pos2(cx + hw, dn_y + 1.0), egui::pos2(cx, dn_y - 1.0)],
+        egui::Stroke::new(1.5_f32, color),
+    );
+}
+
+/// Draw a simple cog/gear icon using a circle and a dot.
+fn draw_cog(p: &egui::Painter, rect: egui::Rect, color: egui::Color32) {
+    let c = rect.center();
+    let r = 5.0;
+    // Outer circle
+    p.circle_stroke(c, r + 1.0, egui::Stroke::new(1.5_f32, color));
+    // Inner dot
+    p.circle_filled(c, 2.0, color);
+}
+
+/// Draw an up-pointing or down-pointing triangle.
+fn draw_triangle(ui: &egui::Ui, rect: egui::Rect, up: bool) {
+    let p = ui.painter();
+    let c = rect.center();
+    let color = egui::Color32::from_gray(180);
+    let hw = 5.0;
+    if up {
+        let top = c.y - 3.0;
+        let bot = c.y + 4.0;
+        p.line_segment(
+            [egui::pos2(c.x - hw, bot), egui::pos2(c.x, top)],
+            egui::Stroke::new(1.5_f32, color),
+        );
+        p.line_segment(
+            [egui::pos2(c.x + hw, bot), egui::pos2(c.x, top)],
+            egui::Stroke::new(1.5_f32, color),
+        );
+        p.line_segment(
+            [egui::pos2(c.x - hw, bot), egui::pos2(c.x + hw, bot)],
+            egui::Stroke::new(1.5_f32, color),
+        );
+    } else {
+        let top = c.y - 4.0;
+        let bot = c.y + 3.0;
+        p.line_segment(
+            [egui::pos2(c.x - hw, top), egui::pos2(c.x, bot)],
+            egui::Stroke::new(1.5_f32, color),
+        );
+        p.line_segment(
+            [egui::pos2(c.x + hw, top), egui::pos2(c.x, bot)],
+            egui::Stroke::new(1.5_f32, color),
+        );
+        p.line_segment(
+            [egui::pos2(c.x - hw, top), egui::pos2(c.x + hw, top)],
+            egui::Stroke::new(1.5_f32, color),
+        );
+    }
 }
