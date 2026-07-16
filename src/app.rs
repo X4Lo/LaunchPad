@@ -330,10 +330,13 @@ impl eframe::App for LaunchpadApp {
             )
             .show(ctx, |ui| self.render_title_bar(ui, accent_color));
         if self.show_settings {
+            let center = ctx.screen_rect().center();
             egui::Window::new("Settings")
-                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .default_pos(center)
                 .collapsible(false)
                 .resizable(false)
+                .movable(true)
+                .constrain(false)
                 .show(ctx, |ui| self.render_settings(ui));
         }
         if let Some(ref cm) = self.context_menu.clone() {
@@ -342,10 +345,13 @@ impl eframe::App for LaunchpadApp {
         if let Some((id, ref mut text)) = self.pending_rename.clone() {
             let mut t = text.clone();
             let item_id = id;
+            let center = ctx.screen_rect().center();
             egui::Window::new("Rename")
-                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .default_pos(center)
                 .collapsible(false)
                 .resizable(false)
+                .movable(true)
+                .constrain(false)
                 .show(ctx, |ui| {
                     ui.label("New name:");
                     ui.text_edit_singleline(&mut t);
@@ -389,10 +395,13 @@ impl eframe::App for LaunchpadApp {
                 })
                 .next()
                 .unwrap_or(0);
+            let center = ctx.screen_rect().center();
             egui::Window::new("Confirm Delete")
-                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .default_pos(center)
                 .collapsible(false)
                 .resizable(false)
+                .movable(true)
+                .constrain(false)
                 .show(ctx, |ui| {
                     ui.label(format!("Delete group \"{}\"?", group_title));
                     ui.label(format!(
@@ -506,6 +515,21 @@ impl eframe::App for LaunchpadApp {
         // Resize handles — rendered as an overlay so they're always reachable
         self.render_resize_handles(ctx);
         self.handle_keyboard(ctx);
+
+        // Window border — frameless window gets a visible outline
+        egui::Area::new("window_border".into())
+            .fixed_pos(egui::pos2(0.0, 0.0))
+            .interactable(false)
+            .show(ctx, |ui| {
+                let r = ui.ctx().screen_rect();
+                ui.painter().rect_stroke(
+                    r,
+                    egui::CornerRadius::same(12),
+                    egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(0x50, 0x52, 0x58)),
+                    egui::StrokeKind::Inside,
+                );
+            });
+
         // Poll regularly so hotkey/tray events are picked up
         ctx.request_repaint_after(std::time::Duration::from_millis(100));
     }
@@ -945,10 +969,13 @@ impl LaunchpadApp {
                 }
             })
             .collect();
+        let center = ctx.screen_rect().center();
         egui::Window::new("Select Group")
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .default_pos(center)
             .collapsible(false)
             .resizable(false)
+            .movable(true)
+            .constrain(false)
             .show(ctx, |ui| {
                 ui.label("Choose a group:");
                 ui.separator();
@@ -1092,10 +1119,13 @@ impl LaunchpadApp {
 
     fn render_reorder_view(&mut self, ctx: &egui::Context) {
         let items: Vec<LaunchItem> = self.current_items().to_vec();
+        let center = ctx.screen_rect().center();
         egui::Window::new("Reorder Items")
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .default_pos(center)
             .collapsible(false)
             .resizable(false)
+            .movable(true)
+            .constrain(false)
             .default_width(320.0)
             .show(ctx, |ui| {
                 ui.label(if self.is_at_root() {
