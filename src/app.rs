@@ -40,6 +40,7 @@ pub struct LaunchpadApp {
     resize_start: Option<egui::Pos2>,
     show_reorder: bool,
     auto_fit: bool,
+    pending_hotkey: String,
 }
 
 #[derive(Clone)]
@@ -61,6 +62,7 @@ impl LaunchpadApp {
         config: Config,
         config_manager: ConfigManager,
     ) -> Self {
+        let hotkey_str = config.hotkey.clone();
         Self {
             hotkey_rx,
             tray_rx,
@@ -80,6 +82,7 @@ impl LaunchpadApp {
             resize_start: None,
             show_reorder: false,
             auto_fit: false,
+            pending_hotkey: hotkey_str,
         }
     }
     fn mark_dirty(&mut self) {
@@ -707,24 +710,45 @@ impl LaunchpadApp {
             ui.separator();
             ui.label("Global Hotkey");
             ui.label("Format: Ctrl+Alt+R, Ctrl+Shift+F, etc.");
-            let mut hk = self.config.hotkey.clone();
-            if ui.text_edit_singleline(&mut hk).changed() {
-                // Validate the new hotkey
+            let mut hk = self.pending_hotkey.clone();
+            let resp = ui.text_edit_singleline(&mut hk);
+            if resp.changed() {
+                self.pending_hotkey = hk.clone();
+            }
+            // Sync from config when user isn't editing
+            if !resp.has_focus() && self.pending_hotkey != self.config.hotkey {
+                self.pending_hotkey = self.config.hotkey.clone();
+            }
+            // Validate and save only when a valid hotkey is present and differs from config
+            if hk != self.config.hotkey {
                 if hotkey::parse_hotkey(&hk).is_some() {
-                    self.config.hotkey = hk;
+                    self.config.hotkey = hk.clone();
                     self.mark_dirty();
                     ui.label(
                         egui::RichText::new("Valid — restart to apply")
                             .color(egui::Color32::from_rgb(100, 200, 100)),
                     );
-                } else {
+                } else if !hk.is_empty() {
                     ui.label(
                         egui::RichText::new("Invalid hotkey format")
                             .color(egui::Color32::from_rgb(255, 100, 100)),
                     );
                 }
             }
-            ui.label("Changes take effect after restart.");
+            ui.add_space(4.0);
+            if ui
+                .checkbox(&mut self.config.hotkey_on_release, "Trigger on key release")
+                .changed()
+            {
+                self.mark_dirty();
+            }
+            ui.label("When off, triggers on key press instead.");
+            ui.add_space(2.0);
+            ui.label(
+                egui::RichText::new("Restart required for hotkey changes to take effect.")
+                    .color(egui::Color32::from_rgb(255, 100, 100))
+                    .size(11.0),
+            );
         });
 
         // ── Themes ──

@@ -137,6 +137,10 @@ pub struct Config {
     /// Global hotkey string, e.g. "Ctrl+Alt+R".
     #[serde(default = "default_hotkey")]
     pub hotkey: String,
+
+    /// Whether the hotkey triggers on key release (true) or key press (false).
+    #[serde(default = "default_true")]
+    pub hotkey_on_release: bool,
 }
 
 fn default_spacing() -> f32 {
@@ -147,6 +151,9 @@ fn default_icon_size() -> f32 {
 }
 fn default_hotkey() -> String {
     "Ctrl+Alt+R".into()
+}
+fn default_true() -> bool {
+    true
 }
 
 impl Default for Config {
@@ -163,6 +170,7 @@ impl Default for Config {
             themes: Theme::builtin_themes(),
             selected_theme: None,
             hotkey: default_hotkey(),
+            hotkey_on_release: true,
         }
     }
 }

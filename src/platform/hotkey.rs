@@ -128,6 +128,7 @@ fn parse_key(s: &str) -> Option<Code> {
 pub fn register_hotkey(
     tx: Sender<()>,
     hotkey_str: &str,
+    on_release: bool,
 ) -> Result<GlobalHotKeyManager, Box<dyn std::error::Error>> {
     let manager = GlobalHotKeyManager::new()?;
 
@@ -136,15 +137,17 @@ pub fn register_hotkey(
 
     manager.register(hotkey)?;
 
-    let hk = hotkey_str.to_string();
     std::thread::spawn(move || {
         let receiver = GlobalHotKeyEvent::receiver();
-        log::info!("Hotkey listener thread started");
+        log::info!("Hotkey listener started (on_release={})", on_release);
         loop {
             if let Ok(event) = receiver.recv() {
-                // Only trigger on key release to avoid double-fire from key-down
-                if event.state == global_hotkey::HotKeyState::Released {
-                    log::info!("Hotkey released!");
+                let fire = if on_release {
+                    event.state == global_hotkey::HotKeyState::Released
+                } else {
+                    event.state == global_hotkey::HotKeyState::Pressed
+                };
+                if fire {
                     let _ = tx.send(());
                     crate::app::wake_ui();
                 }
@@ -152,6 +155,6 @@ pub fn register_hotkey(
         }
     });
 
-    log::info!("Global hotkey registered: {}", hk);
+    log::info!("Global hotkey registered: {}", hotkey_str);
     Ok(manager)
 }

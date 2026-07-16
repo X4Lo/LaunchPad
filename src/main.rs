@@ -31,7 +31,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Global hotkey — register here on the main thread.
     // wake_ui() in the listener thread ensures egui processes the event.
-    match hotkey::register_hotkey(hotkey_tx, &config.hotkey) {
+    match hotkey::register_hotkey(hotkey_tx, &config.hotkey, config.hotkey_on_release) {
         Ok(mgr) => {
             std::mem::forget(mgr);
             log::info!("Global hotkey registered ({})", config.hotkey);
