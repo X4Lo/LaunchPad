@@ -39,6 +39,7 @@ pub struct LaunchpadApp {
     resizing: Option<ResizeEdge>,
     resize_start: Option<egui::Pos2>,
     show_reorder: bool,
+    auto_fit: bool,
 }
 
 #[derive(Clone)]
@@ -78,6 +79,7 @@ impl LaunchpadApp {
             resizing: None,
             resize_start: None,
             show_reorder: false,
+            auto_fit: false,
         }
     }
     fn mark_dirty(&mut self) {
@@ -172,6 +174,36 @@ impl LaunchpadApp {
         }
         false
     }
+}
+
+/// Compute the largest icon size that fits `n` items in the given area.
+fn compute_fit_icon_size(n: usize, sp: f32, tw: f32, th: f32) -> f32 {
+    if n == 0 {
+        return 48.0;
+    }
+    let mut lo = 12.0_f32;
+    let mut hi = 256.0_f32;
+    let mut best = 24.0_f32;
+    for _ in 0..30 {
+        let mid = (lo + hi) / 2.0;
+        let iw = mid + 48.0;
+        let ih = mid + 28.0;
+        let cols = ((tw + sp) / (iw + sp)).floor() as usize;
+        if cols == 0 {
+            hi = mid;
+            continue;
+        }
+        let rows = (n + cols - 1) / cols;
+        let needed_h = rows as f32 * (ih + sp) - sp;
+        let needed_w = cols as f32 * (iw + sp) - sp;
+        if needed_h <= th && needed_w <= tw {
+            best = mid;
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    best.clamp(12.0, 200.0)
 }
 
 impl eframe::App for LaunchpadApp {
@@ -562,6 +594,23 @@ impl LaunchpadApp {
             egui::FontId::proportional(13.0),
             egui::Color32::from_gray(160),
         );
+        // Fit-to-window button (toggle auto-fit mode)
+        let fr = egui::Rect::from_min_size(
+            egui::pos2(bounds.right() - 132.0, bounds.top() + 4.0),
+            egui::vec2(24.0, 24.0),
+        );
+        if ui.rect_contains_pointer(fr)
+            && ui.input(|i| i.pointer.button_clicked(egui::PointerButton::Primary))
+        {
+            self.auto_fit = !self.auto_fit;
+            log::info!("Auto-fit: {}", self.auto_fit);
+        }
+        let fit_color = if self.auto_fit {
+            egui::Color32::from_rgb(0xF2, 0xC9, 0x4C)
+        } else {
+            egui::Color32::from_gray(180)
+        };
+        draw_fit_icon(&p, fr, fit_color);
         // Reorder button — draw up/down arrows
         let rr = egui::Rect::from_min_size(
             egui::pos2(bounds.right() - 100.0, bounds.top() + 4.0),
@@ -641,6 +690,7 @@ impl LaunchpadApp {
                 .add(egui::Slider::new(&mut self.config.grid_icon_size, 24.0..=72.0).text("px"))
                 .changed()
             {
+                self.auto_fit = false;
                 self.mark_dirty();
             }
             ui.separator();
@@ -687,6 +737,7 @@ impl LaunchpadApp {
             let is_none = current.is_none();
             if ui.selectable_label(is_none, none_label).clicked() {
                 self.config.selected_theme = None;
+                self.auto_fit = false;
                 self.mark_dirty();
             }
             for theme in &self.config.themes.clone() {
@@ -699,6 +750,7 @@ impl LaunchpadApp {
                 };
                 if ui.selectable_label(is_sel, preview).clicked() {
                     self.config.selected_theme = Some(theme.name.clone());
+                    self.auto_fit = false;
                     self.mark_dirty();
                 }
             }
@@ -907,7 +959,12 @@ impl LaunchpadApp {
     fn render_grid(&mut self, ui: &mut egui::Ui, items: &[LaunchItem]) {
         let theme = self.config.resolve_theme();
         let sp = theme.grid_spacing.unwrap_or(self.config.grid_spacing);
-        let isz = theme.grid_icon_size.unwrap_or(self.config.grid_icon_size);
+        // Auto-fit: compute optimal size every frame when enabled
+        let isz = if self.auto_fit {
+            compute_fit_icon_size(items.len(), sp, ui.available_width(), ui.available_height())
+        } else {
+            theme.grid_icon_size.unwrap_or(self.config.grid_icon_size)
+        };
         let iw = isz + 48.0;
         let ih = isz + 28.0;
         let tw = ui.available_width();
@@ -1376,4 +1433,72 @@ fn draw_triangle(ui: &egui::Ui, rect: egui::Rect, up: bool) {
             egui::Stroke::new(1.5_f32, color),
         );
     }
+}
+
+/// Draw a fit/resize icon: four outward-pointing arrows in corners.
+fn draw_fit_icon(p: &egui::Painter, rect: egui::Rect, color: egui::Color32) {
+    let c = rect.center();
+    let s = 3.0; // arrow arm length
+    let g = 4.0; // gap from corner
+    let stroke = egui::Stroke::new(1.5_f32, color);
+    // Top-left corner arrows
+    p.line_segment(
+        [
+            egui::pos2(c.x - g - s, c.y - g),
+            egui::pos2(c.x - g, c.y - g),
+        ],
+        stroke,
+    );
+    p.line_segment(
+        [
+            egui::pos2(c.x - g, c.y - g - s),
+            egui::pos2(c.x - g, c.y - g),
+        ],
+        stroke,
+    );
+    // Top-right corner arrows
+    p.line_segment(
+        [
+            egui::pos2(c.x + g + s, c.y - g),
+            egui::pos2(c.x + g, c.y - g),
+        ],
+        stroke,
+    );
+    p.line_segment(
+        [
+            egui::pos2(c.x + g, c.y - g - s),
+            egui::pos2(c.x + g, c.y - g),
+        ],
+        stroke,
+    );
+    // Bottom-left corner arrows
+    p.line_segment(
+        [
+            egui::pos2(c.x - g - s, c.y + g),
+            egui::pos2(c.x - g, c.y + g),
+        ],
+        stroke,
+    );
+    p.line_segment(
+        [
+            egui::pos2(c.x - g, c.y + g + s),
+            egui::pos2(c.x - g, c.y + g),
+        ],
+        stroke,
+    );
+    // Bottom-right corner arrows
+    p.line_segment(
+        [
+            egui::pos2(c.x + g + s, c.y + g),
+            egui::pos2(c.x + g, c.y + g),
+        ],
+        stroke,
+    );
+    p.line_segment(
+        [
+            egui::pos2(c.x + g, c.y + g + s),
+            egui::pos2(c.x + g, c.y + g),
+        ],
+        stroke,
+    );
 }
