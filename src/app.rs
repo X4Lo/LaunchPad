@@ -1,14 +1,25 @@
 use crossbeam::channel::Receiver;
 use egui::Context;
-use std::cell::RefCell;
+use std::sync::{Mutex, OnceLock};
 
 use crate::commands;
 use crate::config::manager::{Config, ConfigManager};
 use crate::models::item::{ItemId, LaunchItem};
+use crate::platform::hotkey;
 use crate::platform::tray::TrayEvent;
 use crate::ui::icons::IconCache;
 
-thread_local! { static CTX: RefCell<Option<egui::Context>> = const { RefCell::new(None) }; }
+/// Global egui context so background threads can wake the UI.
+static UI_CTX: OnceLock<Mutex<Context>> = OnceLock::new();
+
+/// Wake egui's event loop from any thread (hotkey, tray, etc).
+pub fn wake_ui() {
+    if let Some(m) = UI_CTX.get() {
+        if let Ok(ctx) = m.lock() {
+            ctx.request_repaint();
+        }
+    }
+}
 
 pub struct LaunchpadApp {
     hotkey_rx: Receiver<()>,
@@ -133,11 +144,11 @@ impl LaunchpadApp {
         }
     }
     fn minimize(&self) {
-        CTX.with(|c| {
-            if let Some(ref ctx) = *c.borrow() {
+        if let Some(m) = UI_CTX.get() {
+            if let Ok(ctx) = m.lock() {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
             }
-        });
+        }
     }
     fn has_custom_icon(&self, id: ItemId) -> bool {
         for item in &self.config.items {
@@ -165,13 +176,34 @@ impl LaunchpadApp {
 
 impl eframe::App for LaunchpadApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
-        CTX.with(|c| *c.borrow_mut() = Some(ctx.clone()));
+        UI_CTX.get_or_init(|| Mutex::new(ctx.clone()));
+
+        // Process hotkey — toggle window visibility
+        let mut hotkey_fired = false;
         while self.hotkey_rx.try_recv().is_ok() {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            hotkey_fired = true;
         }
+        if hotkey_fired {
+            log::info!("Processing hotkey toggle");
+            let minimized = ctx.input(|i| i.viewport().minimized.unwrap_or(false));
+            if minimized {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+            } else {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+            }
+        }
+
+        // Process tray events
         while let Ok(ev) = self.tray_rx.try_recv() {
+            log::info!("Processing tray event: {:?}", ev);
             match ev {
-                TrayEvent::Toggle => ctx.send_viewport_cmd(egui::ViewportCommand::Focus),
+                TrayEvent::Toggle => {
+                    if ctx.input(|i| i.viewport().minimized.unwrap_or(false)) {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                    } else {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                    }
+                }
                 TrayEvent::Quit => {
                     self.save_if_dirty();
                     std::process::exit(0);
@@ -439,7 +471,8 @@ impl eframe::App for LaunchpadApp {
         // Resize handles — rendered as an overlay so they're always reachable
         self.render_resize_handles(ctx);
         self.handle_keyboard(ctx);
-        ctx.request_repaint();
+        // Poll regularly so hotkey/tray events are picked up
+        ctx.request_repaint_after(std::time::Duration::from_millis(100));
     }
 }
 
@@ -621,6 +654,27 @@ impl LaunchpadApp {
                 self.mark_dirty();
             }
             ui.label("Minimizes after opening an app or folder.");
+            ui.separator();
+            ui.label("Global Hotkey");
+            ui.label("Format: Ctrl+Alt+R, Ctrl+Shift+F, etc.");
+            let mut hk = self.config.hotkey.clone();
+            if ui.text_edit_singleline(&mut hk).changed() {
+                // Validate the new hotkey
+                if hotkey::parse_hotkey(&hk).is_some() {
+                    self.config.hotkey = hk;
+                    self.mark_dirty();
+                    ui.label(
+                        egui::RichText::new("Valid — restart to apply")
+                            .color(egui::Color32::from_rgb(100, 200, 100)),
+                    );
+                } else {
+                    ui.label(
+                        egui::RichText::new("Invalid hotkey format")
+                            .color(egui::Color32::from_rgb(255, 100, 100)),
+                    );
+                }
+            }
+            ui.label("Changes take effect after restart.");
         });
 
         // ── Themes ──

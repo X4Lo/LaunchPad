@@ -26,14 +26,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // System tray
     let tray_icon = generate_tray_icon();
-    let _tray = tray::create_tray(tray_icon, tray_tx)?;
+    let _tray = tray::create_tray(tray_icon, tray_tx, &config.hotkey)?;
     log::info!("System tray created");
 
-    // Global hotkey
-    match hotkey::register_hotkey(hotkey_tx) {
+    // Global hotkey — register here on the main thread.
+    // wake_ui() in the listener thread ensures egui processes the event.
+    match hotkey::register_hotkey(hotkey_tx, &config.hotkey) {
         Ok(mgr) => {
             std::mem::forget(mgr);
-            log::info!("Global hotkey registered (Ctrl+Alt+R)");
+            log::info!("Global hotkey registered ({})", config.hotkey);
         }
         Err(e) => log::warn!("Hotkey unavailable: {}", e),
     }

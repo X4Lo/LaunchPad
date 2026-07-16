@@ -68,11 +68,36 @@ Configuration is stored as JSON. The default location is `%APPDATA%\Launchpad\co
   "window_height": 480,
   "grid_spacing": 12,
   "grid_icon_size": 48,
-  "hide_on_launch": false
+  "hide_on_launch": false,
+  "hotkey": "Ctrl+Alt+R"
 }
 ```
 
 Window position and size are saved automatically whenever you move or resize the launcher.
+
+### Hotkey
+
+The global hotkey toggles Launchpad visibility (show/hide). It defaults to `Ctrl+Alt+R`.
+
+You can change it in `config.json`:
+
+```json
+{
+  "hotkey": "Ctrl+Shift+F"
+}
+```
+
+Or edit it from **Settings > General > Global Hotkey**. The change takes effect after restart.
+
+**Supported modifiers:** `Ctrl`, `Alt`, `Shift`, `Win`/`Super`
+
+**Supported keys:** `A`–`Z`, `0`–`9`, `F1`–`F12`, `Space`, `Tab`, `Esc`, `Enter`, `Backspace`, `Delete`, arrow keys (`Up`/`Down`/`Left`/`Right`), `Home`, `End`, `PageUp`/`PageDown`, `PrintScreen`, `ScrollLock`, `Pause`, `Insert`, `CapsLock`, `NumLock`, numpad keys (`Num0`–`Num9`, `NumAdd`, `NumSubtract`, `NumMultiply`, `NumDivide`, `NumDecimal`, `NumEnter`).
+
+**Examples:**
+- `Ctrl+Alt+R` (default)
+- `Ctrl+Shift+F`
+- `Win+Space`
+- `Alt+F12`
 
 ### Themes
 

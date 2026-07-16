@@ -133,6 +133,10 @@ pub struct Config {
     /// Name of the currently selected theme (None = use defaults).
     #[serde(default)]
     pub selected_theme: Option<String>,
+
+    /// Global hotkey string, e.g. "Ctrl+Alt+R".
+    #[serde(default = "default_hotkey")]
+    pub hotkey: String,
 }
 
 fn default_spacing() -> f32 {
@@ -140,6 +144,9 @@ fn default_spacing() -> f32 {
 }
 fn default_icon_size() -> f32 {
     48.0
+}
+fn default_hotkey() -> String {
+    "Ctrl+Alt+R".into()
 }
 
 impl Default for Config {
@@ -155,6 +162,7 @@ impl Default for Config {
             hide_on_launch: false,
             themes: Theme::builtin_themes(),
             selected_theme: None,
+            hotkey: default_hotkey(),
         }
     }
 }

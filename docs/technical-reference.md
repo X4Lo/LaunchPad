@@ -521,32 +521,40 @@ pub enum TrayEvent {
 }
 ```
 
-Sent from the tray menu callback to the app via channel.
+Sent from the tray menu listener thread to the app via crossbeam channel.
 
 #### `create_tray`
 
 ```rust
-pub fn create_tray(icon: Icon, tx: Sender<TrayEvent>) -> Result<TrayIcon, Box<dyn Error>>
+pub fn create_tray(icon: Icon, tx: Sender<TrayEvent>, hotkey: &str) -> Result<TrayIcon, Box<dyn Error>>
 ```
 
 1. Creates two menu items: "Show / Hide" and "Quit".
-2. Builds a `TrayIcon` with the provided icon and tooltip "Launchpad — Ctrl+Alt+R to toggle".
-3. Registers a global event handler via `MenuEvent::set_event_handler` that maps menu item IDs to `TrayEvent::Toggle` or `TrayEvent::Quit` and sends them through the channel.
+2. Builds a `TrayIcon` with the provided icon and tooltip showing the current hotkey.
+3. Spawns a listener thread that blocks on `MenuEvent::receiver().recv()`. On Toggle, sends `TrayEvent::Toggle` through the channel and calls `wake_ui()` to nudge egui. On Quit, calls `std::process::exit(0)` immediately.
 
 Uses `tray_icon` crate (v0.24).
 
 ### `platform/hotkey.rs`
 
+#### `parse_hotkey`
+
+```rust
+pub fn parse_hotkey(s: &str) -> Option<HotKey>
+```
+
+Parses a human-readable hotkey string like `"Ctrl+Alt+R"`. Supports `Ctrl`/`Control`, `Alt`, `Shift`, `Win`/`Super`/`Windows` modifiers plus A–Z, 0–9, F1–F12, Space, Tab, Esc, Enter, Backspace, Delete, arrows, Home, End, PageUp/Down, numpad, and function keys.
+
 #### `register_hotkey`
 
 ```rust
-pub fn register_hotkey(tx: Sender<()>) -> Result<GlobalHotKeyManager, Box<dyn Error>>
+pub fn register_hotkey(tx: Sender<()>, hotkey_str: &str) -> Result<GlobalHotKeyManager, Box<dyn Error>>
 ```
 
 1. Creates a `GlobalHotKeyManager`.
-2. Registers `Ctrl+Alt+R` (`Modifiers::CONTROL | Modifiers::ALT` + `Code::KeyR`).
-3. Spawns a dedicated thread that blocks on `GlobalHotKeyEvent::receiver().recv()` and forwards each event as `()` through the channel.
-4. Returns the manager. The caller (`main.rs`) uses `mem::forget` to leak it, keeping the hotkey alive for the process lifetime.
+2. Parses the hotkey string and registers it.
+3. Spawns a listener thread that blocks on `GlobalHotKeyEvent::receiver().recv()`. Filters for `HotKeyState::Released` only (to avoid key-down/key-up double-fire). On event, sends `()` through the channel and calls `crate::app::wake_ui()` to nudge egui.
+4. Returns the manager. The caller uses `mem::forget` to keep it alive.
 
 Uses `global_hotkey` crate (v0.8).
 

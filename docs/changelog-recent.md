@@ -2,6 +2,40 @@
 
 ## New Features
 
+### Configurable Global Hotkey
+- New `hotkey` field in `Config` (default: `"Ctrl+Alt+R"`).
+- `parse_hotkey()` parses human-readable strings like `"Ctrl+Shift+F"` into `HotKey`.
+- Supports Ctrl/Alt/Shift/Win modifiers plus A–Z, 0–9, F1–F12, arrows, numpad, and more.
+- Editable in Settings > General with live validation.
+- Tray tooltip shows the current hotkey.
+
+### Hotkey & Tray Toggle
+- Hotkey now toggles window visibility (minimize/restore) instead of just focusing.
+- Tray "Show / Hide" toggles window visibility.
+- Filtered to key-release only to prevent key-down/key-up double-fire.
+- Dedicated listener threads with `wake_ui()` to nudge egui's event loop when background events arrive.
+
+### Improved Tray Icon
+- Cleaner rounded-square design with thicker "L" shape.
+- Uses app theme colors (`#1F2127` background, `#808288` accent).
+
+### Emoji-Free Icons
+- All Unicode emojis replaced with painter-drawn vector shapes (triangles, circles, lines).
+- Breadcrumb arrow: `>` text instead of `▸`.
+- Settings gear: drawn circle + dot.
+- Reorder toggle: drawn up/down arrows.
+- Reorder view: colored labels (A/G/F) and drawn triangle up/down buttons.
+- Breadcrumb icons: colored squares instead of emoji.
+
+### Icon Copy to Local Storage
+- Custom icons are now copied to `icons/` (next to `config.json`) with UUID-based filenames.
+- The original file is no longer referenced directly.
+
+### Reorder View
+- Reorder button (drawn arrows) in the title bar opens a list view.
+- Move items up/down with arrow buttons.
+- Context-aware: shows root items or group items depending on navigation.
+
 ### Theme System
 - New `Theme` struct with fields: `name`, `header_color`, `body_color`, `widget_color`, `selection_color`, `divider_color`, `text_color`, `corner_radius`, `grid_spacing`, `grid_icon_size`.
 - `Config` now has `themes: Vec<Theme>` and `selected_theme: Option<String>`.
