@@ -262,24 +262,38 @@ The configuration system is built around a single `Config` struct that holds all
 
 #### Config file resolution
 
-`ConfigManager::new()` resolves the config path through a four-step decision chain:
+`ConfigManager::new()` runs **before** the egui window exists (called from `main()` at line 20, while `eframe::run_native()` is at line 57). It resolves the path in three steps:
 
-1. **Existing portable** — If `config.json` already exists next to the executable, use it (no prompt).
-2. **Existing AppData** — If `%APPDATA%/Launchpad/config.json` already exists, use it (no prompt).
-3. **First-run dialog** — If no config exists anywhere, a native dialog asks the user to choose:
-   - **Yes = Portable mode**: config stored next to the exe (ideal for USB drives).
-   - **No = Normal mode**: config stored in `%APPDATA%/Launchpad/` (recommended for installed apps).
-   - If portable is chosen but the exe directory is read-only (e.g. `Program Files`), a warning appears and the app falls back to AppData.
-4. **Fallback** — AppData mode (either chosen by user, or as fallback from failed portable).
+1. **Existing portable** — If `config.json` already exists next to the executable, use it.
+2. **Existing AppData** — If `%APPDATA%/Launchpad/config.json` already exists, use it.
+3. **First run** — If neither exists, sets `pending_first_run = true` and uses AppData as a tentative path. No file is created yet, and no prompt is shown — the choice is **deferred** to the in-app setup dialog that appears once the egui window is ready.
+
+The setup dialog (`render_first_run_setup` in `app.rs`) presents two buttons:
+- **Portable** — creates `config.json` next to the exe. If the directory is read-only (e.g. `Program Files`), it silently falls back to AppData.
+- **Normal (recommended)** — creates `config.json` in `%APPDATA%/Launchpad/`.
+
+`ConfigManager::finalize_first_run(use_portable)` handles the file/directory creation and updates `config_path`.
 
 | Mode | Location | When used |
 |---|---|---|
 | Portable | `<exe_dir>/config.json` | Already exists, or user chose it on first run |
-| AppData | `%APPDATA%/Launchpad/config.json` | Default, or user chose it, or portable fallback |
+| AppData | `%APPDATA%/Launchpad/config.json` | Already exists, user chose it, or portable fallback |
+
+#### Why the setup dialog is deferred
+
+The config path must be resolved **before** the egui window exists because the tray icon, global hotkey, and `LaunchpadApp` all consume the `Config` and `ConfigManager` in `main()` — which runs 37 lines before `eframe::run_native()`. There is no window to draw into during `ConfigManager::new()`.
+
+To keep the first-run prompt in-app (matching the look of the settings panel), the decision is deferred:
+1. `new()` sets `pending_first_run = true` but does not prompt or create files.
+2. `load()` returns factory defaults so the app can start normally.
+3. `update()` checks the flag and renders the setup dialog as an egui `Window` — the first thing the user sees.
+4. Once the user picks a mode, `finalize_first_run()` creates the directory/file and updates `config_path`.
 
 #### First-startup seeding
 
-When the config path is determined and no file exists yet, a default config is seeded — either during `new()` (portable mode) or `load()` (AppData mode). The seed is `Config::default()` serialized as pretty-printed JSON, containing every setting key with its default value. This ensures:
+When `load()` is called and `pending_first_run` is true (no config exists anywhere), it returns `Config::default()` without writing to disk — the app starts with factory settings. The config file is only created later when the user completes the setup dialog and `finalize_first_run()` is called, which writes the current config (including any changes made during the session) to the chosen location.
+
+This ensures:
 
 - All keys are present from the start (no "missing key" surprises later)
 - Users can inspect and hand-edit the file with full context

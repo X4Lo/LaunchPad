@@ -32,6 +32,7 @@ pub struct LaunchpadApp {
     selected_index: Option<usize>,
     icon_cache: IconCache,
     show_settings: bool,
+    show_first_run_setup: bool,
     context_menu: Option<ContextMenuState>,
     pos_restored: bool,
     pending_rename: Option<(ItemId, String)>,
@@ -67,6 +68,7 @@ impl LaunchpadApp {
         config_manager: ConfigManager,
     ) -> Self {
         let hotkey_str = config.hotkey.clone();
+        let pending = config_manager.pending_first_run;
         let icons_dir = config_manager.icons_dir();
         Self {
             hotkey_rx,
@@ -74,6 +76,7 @@ impl LaunchpadApp {
             config,
             config_manager,
             dirty: false,
+            show_first_run_setup: pending,
             nav_stack: Vec::new(),
             selected_index: None,
             icon_cache: IconCache::new(icons_dir),
@@ -97,7 +100,7 @@ impl LaunchpadApp {
         self.dirty = true;
     }
     fn save_if_dirty(&mut self) {
-        if self.dirty {
+        if self.dirty && !self.config_manager.pending_first_run {
             if let Err(e) = self.config_manager.save(&self.config) {
                 log::error!("Save: {}", e);
             } else {
@@ -527,84 +530,101 @@ impl eframe::App for LaunchpadApp {
             self.context_menu = None;
         }
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                // Left side: breadcrumb
-                if ui
-                    .selectable_label(self.is_at_root(), "Launchpad")
-                    .clicked()
-                {
-                    self.navigate_to_root();
-                }
-                for (i, &gid) in self.nav_stack.iter().enumerate() {
-                    ui.label(">");
-                    let (name, color) = group_name_with_icon(&self.config, gid);
-                    let (sq, _) =
-                        ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
-                    ui.painter()
-                        .rect_filled(sq, egui::CornerRadius::same(2), color);
-                    let label = name;
-                    if i == self.nav_stack.len() - 1 {
-                        ui.label(egui::RichText::new(label).strong());
-                    } else {
-                        ui.label(label);
-                    }
-                }
-                // Right side: search box
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let search_changed = ui
-                        .add_sized(
-                            egui::vec2(160.0, 20.0),
-                            egui::TextEdit::singleline(&mut self.search_query)
-                                .hint_text("Search..."),
-                        )
-                        .changed();
-                    if search_changed && !self.search_query.is_empty() {
-                        // Navigate to root so we show results from everywhere
-                        self.nav_stack.clear();
-                    }
-                });
-            });
-            // Custom subtle divider
-            let div_color = hex_opt(&self.config.resolve_theme().divider_color)
-                .unwrap_or(egui::Color32::from_rgb(0x3D, 0x3F, 0x43));
-            let div_y = ui.cursor().top();
-            ui.add_space(6.0);
-            let div_rect = egui::Rect::from_min_max(
-                egui::pos2(ui.min_rect().left() + 12.0, div_y),
-                egui::pos2(ui.max_rect().right() - 12.0, div_y + 1.0),
-            );
-            ui.painter()
-                .rect_filled(div_rect, egui::CornerRadius::ZERO, div_color);
-            ui.add_space(6.0);
-            let items: Vec<LaunchItem> = if self.search_query.is_empty() {
-                self.current_items().to_vec()
-            } else {
-                self.search_all_items(&self.search_query)
-            };
-            if items.is_empty() {
-                ui.add_space(60.0);
+            if self.show_first_run_setup {
+                // Render an empty background — the setup dialog floats on top.
                 ui.vertical_centered(|ui| {
-                    if self.search_query.is_empty() {
-                        ui.label(
-                            egui::RichText::new("Empty")
-                                .color(egui::Color32::from_gray(150))
-                                .size(16.0),
-                        );
-                        if ui.button("Add Demo Items").clicked() {
-                            self.add_demo_items();
-                        }
-                    } else {
-                        ui.label(
-                            egui::RichText::new("No results")
-                                .color(egui::Color32::from_gray(150))
-                                .size(16.0),
-                        );
-                    }
+                    ui.add_space(60.0);
                 });
             } else {
-                self.render_grid(ui, &items);
+                ui.horizontal(|ui| {
+                    // Left side: breadcrumb
+                    if ui
+                        .selectable_label(self.is_at_root(), "Launchpad")
+                        .clicked()
+                    {
+                        self.navigate_to_root();
+                    }
+                    for (i, &gid) in self.nav_stack.iter().enumerate() {
+                        ui.label(">");
+                        let (name, color) = group_name_with_icon(&self.config, gid);
+                        let (sq, _) =
+                            ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+                        ui.painter()
+                            .rect_filled(sq, egui::CornerRadius::same(2), color);
+                        let label = name;
+                        if i == self.nav_stack.len() - 1 {
+                            ui.label(egui::RichText::new(label).strong());
+                        } else {
+                            ui.label(label);
+                        }
+                    }
+                    // Right side: search box
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let search_changed = ui
+                            .add_sized(
+                                egui::vec2(160.0, 20.0),
+                                egui::TextEdit::singleline(&mut self.search_query)
+                                    .hint_text("Search..."),
+                            )
+                            .changed();
+                        if search_changed && !self.search_query.is_empty() {
+                            // Navigate to root so we show results from everywhere
+                            self.nav_stack.clear();
+                        }
+                    });
+                });
+                // Custom subtle divider
+                let div_color = hex_opt(&self.config.resolve_theme().divider_color)
+                    .unwrap_or(egui::Color32::from_rgb(0x3D, 0x3F, 0x43));
+                let div_y = ui.cursor().top();
+                ui.add_space(6.0);
+                let div_rect = egui::Rect::from_min_max(
+                    egui::pos2(ui.min_rect().left() + 12.0, div_y),
+                    egui::pos2(ui.max_rect().right() - 12.0, div_y + 1.0),
+                );
+                ui.painter()
+                    .rect_filled(div_rect, egui::CornerRadius::ZERO, div_color);
+                ui.add_space(6.0);
+                let items: Vec<LaunchItem> = if self.search_query.is_empty() {
+                    self.current_items().to_vec()
+                } else {
+                    self.search_all_items(&self.search_query)
+                };
+                if items.is_empty() {
+                    ui.add_space(60.0);
+                    ui.vertical_centered(|ui| {
+                        if self.search_query.is_empty() {
+                            ui.label(
+                                egui::RichText::new("Empty")
+                                    .color(egui::Color32::from_gray(150))
+                                    .size(16.0),
+                            );
+                            if ui.button("Add Demo Items").clicked() {
+                                self.add_demo_items();
+                            }
+                        } else {
+                            ui.label(
+                                egui::RichText::new("No results")
+                                    .color(egui::Color32::from_gray(150))
+                                    .size(16.0),
+                            );
+                        }
+                    });
+                } else {
+                    self.render_grid(ui, &items);
+                }
             }
         });
+
+        // First-run setup dialog (floats above the central panel)
+        if self.show_first_run_setup {
+            egui::Window::new("Launchpad Setup")
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .collapsible(false)
+                .resizable(false)
+                .show(ctx, |ui| self.render_first_run_setup(ui));
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
         // Resize handles — rendered as an overlay so they're always reachable
         self.render_resize_handles(ctx);
         self.handle_keyboard(ctx);
@@ -792,6 +812,56 @@ impl LaunchpadApp {
             ],
             egui::Stroke::new(2.0_f32, color),
         );
+    }
+}
+
+// ─── First-Run Setup ─────────────────────────────────────
+
+impl LaunchpadApp {
+    fn render_first_run_setup(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Welcome to Launchpad!");
+        ui.add_space(8.0);
+        ui.label("This looks like your first time running Launchpad.");
+        ui.label("Where should your settings be stored?");
+        ui.add_space(12.0);
+
+        ui.label(egui::RichText::new("Portable mode").size(14.0).strong());
+        ui.label("  config.json is saved next to the executable");
+        ui.label("  Ideal for USB drives or portable use");
+        ui.add_space(8.0);
+
+        ui.label(egui::RichText::new("Normal mode").size(14.0).strong());
+        ui.label("  config.json is saved in your AppData folder");
+        ui.label("  Recommended for installed applications");
+
+        ui.add_space(16.0);
+        ui.horizontal(|ui| {
+            if ui.button("Portable").clicked() {
+                match self.config_manager.finalize_first_run(true) {
+                    Ok(()) => {
+                        let _ = self.config_manager.save(&self.config);
+                        self.show_first_run_setup = false;
+                        log::info!("First-run setup: portable mode chosen");
+                    }
+                    Err(e) => {
+                        log::error!("Portable setup failed: {}", e);
+                        // Try normal mode as fallback
+                        if self.config_manager.finalize_first_run(false).is_ok() {
+                            let _ = self.config_manager.save(&self.config);
+                            self.show_first_run_setup = false;
+                            log::info!("First-run setup: fell back to normal mode");
+                        }
+                    }
+                }
+            }
+            if ui.button("Normal (recommended)").clicked() {
+                if self.config_manager.finalize_first_run(false).is_ok() {
+                    let _ = self.config_manager.save(&self.config);
+                    self.show_first_run_setup = false;
+                    log::info!("First-run setup: normal mode chosen");
+                }
+            }
+        });
     }
 }
 

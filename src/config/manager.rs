@@ -213,19 +213,23 @@ impl Config {
     }
 }
 
+// ─── ConfigManager ───────────────────────────────────────
+
 pub struct ConfigManager {
     config_path: PathBuf,
+    /// true when no config file exists anywhere — app should show first-run setup.
+    pub pending_first_run: bool,
 }
 
 impl ConfigManager {
-    /// Get the Launchpad data directory (creates it if needed).
+    /// Get the Launchpad data directory.
     pub fn data_dir() -> PathBuf {
         dirs::config_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join("Launchpad")
     }
 
-    /// Get the path to a portable config file next to the executable (if it exists).
+    /// Get the path to a portable config next to the exe, if it exists.
     fn portable_config_path() -> Option<PathBuf> {
         let exe_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
         let candidate = exe_dir.join("config.json");
@@ -237,11 +241,18 @@ impl ConfigManager {
         }
     }
 
+    /// Resolve the config path.
+    ///
+    /// Runs **before** the egui window exists (called from `main()` before
+    /// `eframe::run_native`). When no config file is found it sets
+    /// `pending_first_run = true` instead of prompting — the app will show
+    /// an in-window setup dialog once the UI is ready.
     pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
-        // 1. Portable mode: if config.json already exists next to the exe, use it.
+        // 1. Existing portable config — use it.
         if let Some(portable) = Self::portable_config_path() {
             return Ok(Self {
                 config_path: portable,
+                pending_first_run: false,
             });
         }
 
@@ -250,65 +261,57 @@ impl ConfigManager {
             .join("Launchpad");
         let appdata_path = appdata_dir.join("config.json");
 
-        // 2. If AppData config already exists, use it (no prompt needed).
+        // 2. Existing AppData config — use it.
         if appdata_path.exists() {
             std::fs::create_dir_all(&appdata_dir)?;
             return Ok(Self {
                 config_path: appdata_path,
+                pending_first_run: false,
             });
         }
 
-        // 3. First run — no config exists anywhere. Ask the user which mode.
-        let use_portable = rfd::MessageDialog::new()
-            .set_title("Launchpad — First Run Setup")
-            .set_description(
-                "Where should Launchpad store its settings?\n\n\
-                 Click 'Yes' for portable mode:\n\
-                 \u{2022} config.json saved next to the executable\n\
-                 \u{2022} Ideal for USB drives or portable use\n\n\
-                 Click 'No' for normal mode:\n\
-                 \u{2022} config.json saved in AppData folder\n\
-                 \u{2022} Recommended for installed applications",
-            )
-            .set_buttons(rfd::MessageButtons::YesNo)
-            .set_level(rfd::MessageLevel::Info)
-            .show();
+        // 3. First run — defer to in-app dialog.
+        log::info!("First run detected — deferring setup to in-app dialog");
+        Ok(Self {
+            config_path: appdata_path, // tentative; may be overwritten
+            pending_first_run: true,
+        })
+    }
 
-        if use_portable == rfd::MessageDialogResult::Yes {
+    /// Called from the UI once the user chooses portable or normal mode.
+    /// Creates the directory/file and updates `self.config_path`.
+    /// Returns `Err` if the chosen portable dir isn't writable (caller
+    /// should fall back to `use_portable: false`).
+    pub fn finalize_first_run(
+        &mut self,
+        use_portable: bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if use_portable {
             if let Some(exe_dir) = std::env::current_exe()
                 .ok()
                 .and_then(|p| p.parent().map(|p| p.to_path_buf()))
             {
                 let portable_path = exe_dir.join("config.json");
-                // Seed with default config so load() finds a valid file.
                 let default_config = Config::default();
                 let json = serde_json::to_string_pretty(&default_config).unwrap_or_default();
                 if std::fs::write(&portable_path, &json).is_ok() {
                     log::info!("Portable config created at: {}", portable_path.display());
-                    return Ok(Self {
-                        config_path: portable_path,
-                    });
+                    self.config_path = portable_path;
+                    self.pending_first_run = false;
+                    return Ok(());
                 }
             }
-            // Portable mode failed — warn and fall back to AppData.
-            log::warn!("Could not create portable config, falling back to AppData");
-            rfd::MessageDialog::new()
-                .set_title("Launchpad")
-                .set_description(
-                    "Could not write config file in portable location.\n\
-                     (The executable directory may be read-only.)\n\n\
-                     Falling back to AppData storage.",
-                )
-                .set_buttons(rfd::MessageButtons::Ok)
-                .set_level(rfd::MessageLevel::Warning)
-                .show();
+            log::warn!("Portable config creation failed, falling back to AppData");
         }
 
-        // 4. Normal mode (AppData) or fallback from failed portable.
+        // Normal mode (or fallback from failed portable).
+        let appdata_dir = dirs::config_dir()
+            .ok_or("Could not determine config directory")?
+            .join("Launchpad");
         std::fs::create_dir_all(&appdata_dir)?;
-        Ok(Self {
-            config_path: appdata_path,
-        })
+        self.config_path = appdata_dir.join("config.json");
+        self.pending_first_run = false;
+        Ok(())
     }
 
     /// Returns the icons directory (next to the config file).
@@ -319,11 +322,10 @@ impl ConfigManager {
             .unwrap_or_else(|| PathBuf::from("icons"))
     }
 
+    /// Load config from disk. If pending first run, returns defaults without saving.
     pub fn load(&self) -> Result<Config, Box<dyn std::error::Error>> {
-        if !self.config_path.exists() {
-            let default_config = Config::default();
-            self.save(&default_config)?;
-            return Ok(default_config);
+        if self.pending_first_run || !self.config_path.exists() {
+            return Ok(Config::default());
         }
         let contents = std::fs::read_to_string(&self.config_path)?;
         let mut config: Config = serde_json::from_str(&contents).unwrap_or_else(|e| {
