@@ -732,6 +732,15 @@ impl LaunchpadApp {
             }
             ui.label("Minimizes after opening an app or folder.");
             ui.separator();
+            if ui
+                .checkbox(&mut self.config.auto_start, "Start with Windows")
+                .changed()
+            {
+                self.mark_dirty();
+                crate::platform::autostart::set_auto_start(self.config.auto_start);
+            }
+            ui.label("Launchpad will start automatically when you log in.");
+            ui.separator();
             ui.label("Global Hotkey");
             ui.label("Format: Ctrl+Alt+R, Ctrl+Shift+F, etc.");
             let mut hk = self.pending_hotkey.clone();

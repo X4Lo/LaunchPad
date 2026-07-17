@@ -146,6 +146,17 @@ See [docs/folder-structure.md](docs/folder-structure.md) for the full directory 
 | `Enter` | Open selected item |
 | Arrow keys | Navigate grid items |
 
+## Auto-start with Windows
+
+Enable **Start with Windows** in Settings > General. Launchpad writes a registry value at:
+
+```
+HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run
+    "Launchpad" = "C:\path\to\launchpad.exe"
+```
+
+When disabled, the value is removed. No admin rights required.
+
 ## Item types
 
 | Type | Icon | Behavior |

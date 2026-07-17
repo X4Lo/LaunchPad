@@ -141,6 +141,10 @@ pub struct Config {
     /// Whether the hotkey triggers on key release (true) or key press (false).
     #[serde(default = "default_true")]
     pub hotkey_on_release: bool,
+
+    /// Launchpad should start automatically with Windows.
+    #[serde(default)]
+    pub auto_start: bool,
 }
 
 fn default_spacing() -> f32 {
@@ -171,6 +175,7 @@ impl Default for Config {
             selected_theme: None,
             hotkey: default_hotkey(),
             hotkey_on_release: true,
+            auto_start: false,
         }
     }
 }
