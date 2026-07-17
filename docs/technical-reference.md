@@ -578,6 +578,24 @@ Non-Windows stub. `extract_icon` always returns `None`.
 
 `#[cfg(windows)]`-gated. Currently also returns `None` — full `HICON`-to-RGBA extraction is deferred.
 
+### `platform/autostart.rs`
+
+#### `set_auto_start`
+
+```rust
+pub fn set_auto_start(enable: bool) -> bool
+```
+
+Writes or removes a `REG_SZ` value under `HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run` named `Launchpad` pointing to the current executable path. Returns `true` on success.
+
+#### `is_auto_start_enabled`
+
+```rust
+pub fn is_auto_start_enabled() -> bool
+```
+
+Checks whether the registry value exists using `RegOpenKeyExW` + `RegQueryValueExW`. Used on startup to sync `config.auto_start` with reality.
+
 ---
 
 ## Module: `ui/`
@@ -777,6 +795,38 @@ Programmatically generates a 32×32 tray icon:
 3. Converts to raw RGBA bytes and constructs a `tray_icon::Icon::from_rgba`.
 
 This avoids needing an external PNG file bundled with the binary.
+
+---
+
+## Recent Features (app.rs)
+
+### Search
+
+A search text box on the right of the breadcrumb bar. `search_all_items()` recursively scans root items and all groups for case-insensitive title matches. When searching, the nav stack is cleared to show a flat grid of results.
+
+- `Escape` clears the search query.
+- `Enter` activates the selected result.
+- Changed via `search_query` field on `LaunchpadApp`.
+
+### Auto-Fit Icons
+
+Toggle button in the title bar (outward arrows icon). When active, `compute_fit_icon_size()` runs every frame using `ui.available_width()` and `ui.available_height()` via binary search to find the largest icon size where all items fit without scrolling. Disabled by changing icon size, spacing, or theme.
+
+### Icon Migration
+
+On first frame, `find_external_icons()` scans all items for `icon_path` values pointing outside the `icons/` directory (old-format full paths). If any are found, a dialog offers one-click migration: each file is copied into `icons/` with a UUID name, and the path is updated to just the filename.
+
+### Relative Icon Paths
+
+Icon paths are stored as bare filenames (e.g. `"uuid.png"`). `IconCache::resolve_path()` prepends the `icons/` directory at load time. Full paths still work for backward compatibility.
+
+### Movable Dialogs
+
+All modal windows (Settings, Reorder, Rename, Confirm Delete, Select Group) use `.movable(true).constrain(false).default_pos(center)` — they start centered and can be dragged anywhere, including outside the main window bounds.
+
+### Window Border
+
+An overlay `Area` draws a 1px rounded rect around the viewport edge, giving the frameless main window a visible outline matching the theme's divider color.
 
 ---
 

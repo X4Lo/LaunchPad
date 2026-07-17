@@ -2,18 +2,23 @@
 
 A lightweight, minimalistic desktop application launcher for Windows. Keep your most-used apps one hotkey away — no more hunting through the Start menu or cluttered desktops.
 
+> 🤖 This project was entirely AI-coded (Zed Agent + DeepSeek V4 Pro + Claude) — from architecture design through implementation, UI polish, and documentation.
+
 ## Features
 
-- **Global hotkey** — Press `Ctrl + Alt + R` to summon Launchpad instantly, from anywhere
-- **Always on top** — The launcher floats above all other windows
-- **System tray** — Runs quietly in the background; right-click the tray icon to toggle or quit
-- **Drag & drop** — Drop executables or shortcuts directly onto Launchpad to add them
-- **Groups & folders** — Organize apps into groups (navigable sub-grids) and folders (filesystem shortcuts)
-- **Custom icons** — Assign custom icons to any item; executable icons are extracted automatically
-- **Context menus** — Right-click any item to rename, change icon, move to group, or remove
-- **Resizable window** — Drag the bottom, right, or corner edges to resize
-- **Settings** — Adjust grid spacing, icon size, and auto-hide-on-launch behavior
-- **Portable mode** — Drop a `config.json` next to the executable and Launchpad uses it instead of the system config directory
+- **Global hotkey** — Configurable shortcut (default `Ctrl+Alt+R`) toggles window visibility
+- **System tray** — Runs quietly in the background with Show/Hide and Quit menu
+- **Themes** — Built-in Default, Dracula, Nord, and Catppuccin themes with full color/spacing customization
+- **Search** — Search box filters all items across groups in real time
+- **Drag & drop** — Drop executables or shortcuts to add them instantly
+- **Groups & folders** — Organize apps into navigable groups and filesystem folder shortcuts
+- **Custom icons** — Assign custom icons, auto-extracted from executables, stored locally as portable filenames
+- **Reorder** — List view with up/down buttons to reorder items at any level
+- **Auto-fit** — Toggle that dynamically resizes icons to fill the window
+- **Context menus** — Right-click to rename, change icon, move to group, or remove
+- **Resizable** — Drag bottom/right/corner edges or use the fit button
+- **Auto-start with Windows** — Registry-based, toggle in Settings
+- **Portable mode** — `config.json` next to the exe takes priority over `%APPDATA%`
 
 ## Installation
 
@@ -179,6 +184,7 @@ When disabled, the value is removed. No admin rights required.
 **Requirements:** Rust 1.75+
 
 ```bash
+cargo build # or
 cargo build --release
 ```
 
