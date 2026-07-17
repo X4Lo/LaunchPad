@@ -277,6 +277,19 @@ impl ConfigManager {
                 config.themes.push(builtin);
             }
         }
+
+        // Sync auto-start config with actual registry state
+        let actual = crate::platform::autostart::is_auto_start_enabled();
+        if config.auto_start != actual {
+            log::info!(
+                "Auto-start mismatch: config={}, registry={}. Syncing.",
+                config.auto_start,
+                actual
+            );
+            config.auto_start = actual;
+            self.save(&config)?;
+        }
+
         Ok(config)
     }
 
