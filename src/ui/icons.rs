@@ -14,12 +14,24 @@ pub enum IconKey {
 
 pub struct IconCache {
     textures: HashMap<IconKey, TextureHandle>,
+    icons_dir: PathBuf,
 }
 
 impl IconCache {
-    pub fn new() -> Self {
+    pub fn new(icons_dir: PathBuf) -> Self {
         Self {
             textures: HashMap::new(),
+            icons_dir,
+        }
+    }
+
+    /// Resolve an icon path: if it's just a filename, prepend the icons directory.
+    fn resolve_path(&self, path: &PathBuf) -> PathBuf {
+        // If the path has no directory separators, it's a bare filename
+        if path.parent().map_or(true, |p| p.as_os_str().is_empty()) {
+            self.icons_dir.join(path)
+        } else {
+            path.clone()
         }
     }
 
@@ -29,7 +41,10 @@ impl IconCache {
         }
 
         let texture = match &key {
-            IconKey::Custom(path, size) => load_icon_from_file(path, *size, ctx),
+            IconKey::Custom(path, size) => {
+                let resolved = self.resolve_path(path);
+                load_icon_from_file(&resolved, *size, ctx)
+            }
             IconKey::DefaultApp(exe_path, size) => {
                 // Try to extract the real icon from the executable
                 extract_and_load(exe_path, *size, ctx)

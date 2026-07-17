@@ -67,6 +67,7 @@ impl LaunchpadApp {
         config_manager: ConfigManager,
     ) -> Self {
         let hotkey_str = config.hotkey.clone();
+        let icons_dir = config_manager.icons_dir();
         Self {
             hotkey_rx,
             tray_rx,
@@ -75,7 +76,7 @@ impl LaunchpadApp {
             dirty: false,
             nav_stack: Vec::new(),
             selected_index: None,
-            icon_cache: IconCache::new(),
+            icon_cache: IconCache::new(icons_dir),
             show_settings: false,
             context_menu: None,
             pos_restored: false,
@@ -934,7 +935,9 @@ impl LaunchpadApp {
                         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("png");
                         let dest = icons_dir.join(format!("{}.{}", uuid::Uuid::new_v4(), ext));
                         if std::fs::copy(&path, &dest).is_ok() {
-                            let _ = commands::items::set_icon(&mut self.config, id, dest);
+                            // Store just the filename, not the full path
+                            let filename = dest.file_name().map(PathBuf::from).unwrap_or_default();
+                            let _ = commands::items::set_icon(&mut self.config, id, filename);
                             self.mark_dirty();
                         } else {
                             log::error!(
@@ -1312,8 +1315,13 @@ impl LaunchpadApp {
                                 let dest =
                                     icons_dir.join(format!("{}.{}", uuid::Uuid::new_v4(), ext));
                                 if std::fs::copy(&old_path, &dest).is_ok() {
-                                    let _ =
-                                        commands::items::set_icon(&mut self.config, item_id, dest);
+                                    let filename =
+                                        dest.file_name().map(PathBuf::from).unwrap_or_default();
+                                    let _ = commands::items::set_icon(
+                                        &mut self.config,
+                                        item_id,
+                                        filename,
+                                    );
                                 }
                             }
                         }
