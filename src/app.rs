@@ -1,5 +1,6 @@
 use crossbeam::channel::Receiver;
 use egui::Context;
+use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
 use crate::commands;
@@ -42,6 +43,8 @@ pub struct LaunchpadApp {
     auto_fit: bool,
     pending_hotkey: String,
     search_query: String,
+    icon_migration: Vec<(ItemId, PathBuf)>,
+    icon_migration_done: bool,
 }
 
 #[derive(Clone)]
@@ -85,6 +88,8 @@ impl LaunchpadApp {
             auto_fit: false,
             pending_hotkey: hotkey_str,
             search_query: String::new(),
+            icon_migration: Vec::new(),
+            icon_migration_done: false,
         }
     }
     fn mark_dirty(&mut self) {
@@ -249,6 +254,18 @@ impl eframe::App for LaunchpadApp {
         }
         if !self.pos_restored {
             self.pos_restored = true;
+            // Scan for icons using the old format (external paths instead of icons/ folder)
+            if !self.icon_migration_done {
+                self.icon_migration_done = true;
+                let icons_dir = self.config_manager.icons_dir();
+                self.icon_migration = find_external_icons(&self.config, &icons_dir);
+                if !self.icon_migration.is_empty() {
+                    log::info!(
+                        "Found {} icon(s) using old format (external path)",
+                        self.icon_migration.len()
+                    );
+                }
+            }
             if let (Some(x), Some(y)) = (self.config.window_x, self.config.window_y) {
                 ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::Pos2::new(x, y)));
             }
@@ -425,6 +442,9 @@ impl eframe::App for LaunchpadApp {
                         }
                     });
                 });
+        }
+        if !self.icon_migration.is_empty() {
+            self.render_icon_migration_dialog(ctx);
         }
         if self.show_reorder {
             self.render_reorder_view(ctx);
@@ -1262,6 +1282,74 @@ impl LaunchpadApp {
         collect(&self.config.items, &q, &mut results);
         results
     }
+
+    fn render_icon_migration_dialog(&mut self, ctx: &egui::Context) {
+        let count = self.icon_migration.len();
+        let center = ctx.screen_rect().center();
+        egui::Window::new("Icon Migration")
+            .default_pos(center)
+            .collapsible(false)
+            .resizable(false)
+            .movable(true)
+            .constrain(false)
+            .show(ctx, |ui| {
+                ui.label(format!(
+                    "Found {} custom icon(s) stored outside the icons folder.",
+                    count
+                ));
+                ui.label("Would you like to copy them into the local icons folder?");
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Move").clicked() {
+                        let icons_dir = self.config_manager.icons_dir();
+                        let _ = std::fs::create_dir_all(&icons_dir);
+                        for (item_id, old_path) in self.icon_migration.drain(..) {
+                            if old_path.exists() {
+                                let ext = old_path
+                                    .extension()
+                                    .and_then(|e| e.to_str())
+                                    .unwrap_or("png");
+                                let dest =
+                                    icons_dir.join(format!("{}.{}", uuid::Uuid::new_v4(), ext));
+                                if std::fs::copy(&old_path, &dest).is_ok() {
+                                    let _ =
+                                        commands::items::set_icon(&mut self.config, item_id, dest);
+                                }
+                            }
+                        }
+                        self.mark_dirty();
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.icon_migration.clear();
+                    }
+                });
+            });
+    }
+}
+
+/// Scan config for icon paths pointing outside the icons directory.
+fn find_external_icons(config: &Config, icons_dir: &std::path::Path) -> Vec<(ItemId, PathBuf)> {
+    let mut result = Vec::new();
+    fn scan(items: &[LaunchItem], icons_dir: &std::path::Path, out: &mut Vec<(ItemId, PathBuf)>) {
+        for item in items {
+            let icon_path = match item {
+                LaunchItem::App(a) => &a.icon_path,
+                LaunchItem::Group(g) => &g.icon_path,
+                LaunchItem::Folder(f) => &f.icon_path,
+            };
+            if let Some(ref p) = icon_path {
+                // Check if the icon is NOT inside the icons directory
+                if !p.starts_with(icons_dir) {
+                    out.push((item.id(), p.clone()));
+                }
+            }
+            if let LaunchItem::Group(g) = item {
+                scan(&g.items, icons_dir, out);
+            }
+        }
+    }
+    scan(&config.items, icons_dir, &mut result);
+    result
 }
 
 // ─── Keyboard ────────────────────────────────────────────
