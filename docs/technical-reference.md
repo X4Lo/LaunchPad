@@ -256,6 +256,58 @@ Free function. Looks up a group's title by ID in the config. Returns empty strin
 
 **Path:** `src/config/manager.rs`
 
+### Configuration System Overview
+
+The configuration system is built around a single `Config` struct that holds all user-facing settings. On disk, settings are persisted as JSON in a file named `config.json`.
+
+#### Config file resolution
+
+`ConfigManager::new()` determines the config file path using a two-tier strategy:
+
+1. **Portable mode** — If `config.json` exists in the same directory as the executable, it is used directly. No files are written to `%APPDATA%`. This enables fully portable deployments: drop the exe and config in a folder and run.
+2. **AppData mode** (default) — Otherwise, the config lives at `%APPDATA%/Launchpad/config.json` (via `dirs::config_dir()`). The `Launchpad` directory is created if it doesn't exist.
+
+| Mode | Location | When used |
+|---|---|---|
+| Portable | `<exe_dir>/config.json` | File exists next to the exe |
+| AppData | `%APPDATA%/Launchpad/config.json` | No portable config found |
+
+#### First-startup seeding
+
+When `ConfigManager::load()` is called and no config file exists on disk, it creates one by serializing `Config::default()` — a complete snapshot of every setting with its default value. This ensures:
+
+- All keys are present from the start (no "missing key" surprises later)
+- Users can inspect and hand-edit the file with full context
+- Serde's `#[serde(default)]` on each field handles forward compatibility when new keys are added in future versions
+
+#### How serde defaults work
+
+Each field in `Config` is annotated with `#[serde(default)]` (or `#[serde(default = "fn_name")]` for non-standard defaults). When deserializing, serde substitutes the field's default value if the key is absent from JSON. This means:
+
+- **New keys added in updates** don't break existing config files — they simply get the default value
+- **Removed keys** are silently ignored by serde (no error)
+- `Config::default()` is kept in sync with serde defaults, providing a canonical source of truth
+
+#### Atomic saves
+
+`ConfigManager::save()` writes config atomically: serialize to JSON, write to a `.tmp` file, then rename over the real path. This protects against corruption from crashes or power loss mid-write.
+
+#### Auto-start sync
+
+On load, `ConfigManager::load()` cross-checks the `auto_start` flag against the actual Windows registry state. If they differ (e.g., the user manually toggled it via Task Manager), the config is corrected to match reality and saved.
+
+### Adding a new setting key — step-by-step
+
+When you need to add a new configuration option, follow this checklist:
+
+1. **Add the field** to the `Config` struct in `src/config/manager.rs` with `#[serde(default)]` (or `#[serde(default = "fn_name")]` for non-bool/non-zero defaults).
+2. **Add the field** to `Config::default()` with the same default value.
+3. **Add UI** in `LaunchpadApp::render_settings()` (in `src/app.rs`) so the user can change it.
+4. **Wire up behavior** wherever the setting takes effect (e.g., in `update()`, `render_title_bar()`, etc.).
+5. **Call `self.mark_dirty()`** whenever the setting changes so it gets persisted.
+
+> The first-startup seeding in `ConfigManager::load()` means the new key will automatically appear in the JSON file the next time a fresh config is created. Existing configs will pick up the default via `#[serde(default)]` on next load.
+
 ### `Config`
 
 ```rust
@@ -266,15 +318,19 @@ pub struct Config {
     pub window_height: Option<f32>,
     pub window_x: Option<f32>,
     pub window_y: Option<f32>,
-    pub grid_spacing: f32,       // default 12.0
-    pub grid_icon_size: f32,     // default 48.0
-    pub hide_on_launch: bool,    // default false
-    pub themes: Vec<Theme>,      // built-in + user themes
+    pub grid_spacing: f32,          // default 12.0
+    pub grid_icon_size: f32,        // default 48.0
+    pub hide_on_launch: bool,       // default false
+    pub close_to_tray: bool,        // default false
+    pub themes: Vec<Theme>,         // built-in + user themes
     pub selected_theme: Option<String>, // name of active theme
+    pub hotkey: String,             // default "Ctrl+Alt+R"
+    pub hotkey_on_release: bool,    // default true
+    pub auto_start: bool,           // default false
 }
 ```
 
-All fields use `#[serde(default)]`. `grid_spacing` defaults to `12.0`, `grid_icon_size` to `48.0`, and `themes` defaults to `Theme::builtin_themes()`.
+All fields use `#[serde(default)]` (or a custom default function). `grid_spacing` defaults to `12.0`, `grid_icon_size` to `48.0`, and `themes` defaults to `Theme::builtin_themes()`.
 
 `Config::default()` mirrors the serde defaults explicitly.
 

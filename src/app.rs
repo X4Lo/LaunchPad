@@ -140,7 +140,51 @@ impl LaunchpadApp {
     fn activate_item(&mut self, item: &LaunchItem) {
         match item {
             LaunchItem::App(a) => {
-                let _ = std::process::Command::new(&a.executable_path).spawn();
+                #[cfg(windows)]
+                {
+                    use std::os::windows::ffi::OsStrExt;
+                    use windows::core::PCWSTR;
+                    use windows::Win32::UI::Shell::ShellExecuteW;
+                    use windows::Win32::UI::WindowsAndMessaging::SW_SHOW;
+                    let exe: Vec<u16> = a
+                        .executable_path
+                        .as_os_str()
+                        .encode_wide()
+                        .chain(std::iter::once(0))
+                        .collect();
+                    let dir: Vec<u16> = a
+                        .executable_path
+                        .parent()
+                        .map(|p| {
+                            p.as_os_str()
+                                .encode_wide()
+                                .chain(std::iter::once(0))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    unsafe {
+                        ShellExecuteW(
+                            None,
+                            PCWSTR::null(),
+                            PCWSTR::from_raw(exe.as_ptr()),
+                            PCWSTR::null(),
+                            if dir.is_empty() {
+                                PCWSTR::null()
+                            } else {
+                                PCWSTR::from_raw(dir.as_ptr())
+                            },
+                            SW_SHOW,
+                        );
+                    }
+                }
+                #[cfg(not(windows))]
+                {
+                    let mut cmd = std::process::Command::new(&a.executable_path);
+                    if let Some(parent) = a.executable_path.parent() {
+                        cmd.current_dir(parent);
+                    }
+                    let _ = cmd.spawn();
+                }
                 if self.config.hide_on_launch {
                     self.minimize();
                 }
@@ -720,8 +764,13 @@ impl LaunchpadApp {
         );
         let ch = ui.rect_contains_pointer(cr);
         if ch && ui.input(|i| i.pointer.button_clicked(egui::PointerButton::Primary)) {
-            self.save_if_dirty();
-            std::process::exit(0);
+            if self.config.close_to_tray {
+                ui.ctx()
+                    .send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+            } else {
+                self.save_if_dirty();
+                std::process::exit(0);
+            }
         }
         let color = if ch {
             egui::Color32::from_rgb(255, 80, 80)
@@ -780,6 +829,14 @@ impl LaunchpadApp {
                 self.mark_dirty();
             }
             ui.label("Minimizes after opening an app or folder.");
+            ui.separator();
+            if ui
+                .checkbox(&mut self.config.close_to_tray, "Close to system tray")
+                .changed()
+            {
+                self.mark_dirty();
+            }
+            ui.label("X button hides instead of quitting. Use tray menu to exit.");
             ui.separator();
             if ui
                 .checkbox(&mut self.config.auto_start, "Start with Windows")

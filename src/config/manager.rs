@@ -145,6 +145,10 @@ pub struct Config {
     /// Launchpad should start automatically with Windows.
     #[serde(default)]
     pub auto_start: bool,
+
+    /// When enabled, clicking the X close button hides to tray instead of quitting.
+    #[serde(default)]
+    pub close_to_tray: bool,
 }
 
 fn default_spacing() -> f32 {
@@ -176,6 +180,7 @@ impl Default for Config {
             hotkey: default_hotkey(),
             hotkey_on_release: true,
             auto_start: false,
+            close_to_tray: false,
         }
     }
 }
