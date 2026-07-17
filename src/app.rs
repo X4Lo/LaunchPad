@@ -41,6 +41,7 @@ pub struct LaunchpadApp {
     show_reorder: bool,
     auto_fit: bool,
     pending_hotkey: String,
+    search_query: String,
 }
 
 #[derive(Clone)]
@@ -83,6 +84,7 @@ impl LaunchpadApp {
             show_reorder: false,
             auto_fit: false,
             pending_hotkey: hotkey_str,
+            search_query: String::new(),
         }
     }
     fn mark_dirty(&mut self) {
@@ -461,6 +463,7 @@ impl eframe::App for LaunchpadApp {
         }
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.horizontal(|ui| {
+                // Left side: breadcrumb
                 if ui
                     .selectable_label(self.is_at_root(), "Launchpad")
                     .clicked()
@@ -470,7 +473,6 @@ impl eframe::App for LaunchpadApp {
                 for (i, &gid) in self.nav_stack.iter().enumerate() {
                     ui.label(">");
                     let (name, color) = group_name_with_icon(&self.config, gid);
-                    // Draw small colored square as type indicator
                     let (sq, _) =
                         ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
                     ui.painter()
@@ -482,6 +484,20 @@ impl eframe::App for LaunchpadApp {
                         ui.label(label);
                     }
                 }
+                // Right side: search box
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let search_changed = ui
+                        .add_sized(
+                            egui::vec2(160.0, 20.0),
+                            egui::TextEdit::singleline(&mut self.search_query)
+                                .hint_text("Search..."),
+                        )
+                        .changed();
+                    if search_changed && !self.search_query.is_empty() {
+                        // Navigate to root so we show results from everywhere
+                        self.nav_stack.clear();
+                    }
+                });
             });
             // Custom subtle divider
             let div_color = hex_opt(&self.config.resolve_theme().divider_color)
@@ -495,17 +511,29 @@ impl eframe::App for LaunchpadApp {
             ui.painter()
                 .rect_filled(div_rect, egui::CornerRadius::ZERO, div_color);
             ui.add_space(6.0);
-            let items: Vec<LaunchItem> = self.current_items().to_vec();
+            let items: Vec<LaunchItem> = if self.search_query.is_empty() {
+                self.current_items().to_vec()
+            } else {
+                self.search_all_items(&self.search_query)
+            };
             if items.is_empty() {
                 ui.add_space(60.0);
                 ui.vertical_centered(|ui| {
-                    ui.label(
-                        egui::RichText::new("Empty")
-                            .color(egui::Color32::from_gray(150))
-                            .size(16.0),
-                    );
-                    if ui.button("Add Demo Items").clicked() {
-                        self.add_demo_items();
+                    if self.search_query.is_empty() {
+                        ui.label(
+                            egui::RichText::new("Empty")
+                                .color(egui::Color32::from_gray(150))
+                                .size(16.0),
+                        );
+                        if ui.button("Add Demo Items").clicked() {
+                            self.add_demo_items();
+                        }
+                    } else {
+                        ui.label(
+                            egui::RichText::new("No results")
+                                .color(egui::Color32::from_gray(150))
+                                .size(16.0),
+                        );
                     }
                 });
             } else {
@@ -1216,6 +1244,24 @@ impl LaunchpadApp {
             self.mark_dirty();
         }
     }
+
+    /// Search all items recursively (root + all groups) matching the query.
+    fn search_all_items(&self, query: &str) -> Vec<LaunchItem> {
+        let q = query.to_lowercase();
+        let mut results = Vec::new();
+        fn collect(items: &[LaunchItem], q: &str, out: &mut Vec<LaunchItem>) {
+            for item in items {
+                if item.title().to_lowercase().contains(q) {
+                    out.push(item.clone());
+                }
+                if let LaunchItem::Group(g) = item {
+                    collect(&g.items, q, out);
+                }
+            }
+        }
+        collect(&self.config.items, &q, &mut results);
+        results
+    }
 }
 
 // ─── Keyboard ────────────────────────────────────────────
@@ -1227,7 +1273,11 @@ impl LaunchpadApp {
         let iw = isz + 48.0;
         let cols = ((640.0_f32 + sp) / (iw + sp)).floor() as usize;
         let mut sel = self.selected_index;
-        let items: Vec<LaunchItem> = self.current_items().to_vec();
+        let items: Vec<LaunchItem> = if self.search_query.is_empty() {
+            self.current_items().to_vec()
+        } else {
+            self.search_all_items(&self.search_query)
+        };
         let max = items.len().saturating_sub(1);
         let inp = ctx.input(|i| i.clone());
         if inp.key_pressed(egui::Key::ArrowRight) {
@@ -1251,6 +1301,9 @@ impl LaunchpadApp {
         }
         if inp.key_pressed(egui::Key::Backspace) && !self.nav_stack.is_empty() {
             self.navigate_back();
+        }
+        if inp.key_pressed(egui::Key::Escape) && !self.search_query.is_empty() {
+            self.search_query.clear();
         }
         self.selected_index = sel;
     }

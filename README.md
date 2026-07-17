@@ -52,7 +52,15 @@ Configuration is stored as JSON. The default location is `%APPDATA%\Launchpad\co
       "id": "...",
       "title": "Games",
       "icon_path": null,
-      "items": []
+      "items": [
+        {
+          "type": "app",
+          "id": "...",
+          "title": "Google Chrome",
+          "executable_path": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+          "icon_path": null
+        }
+      ]
     },
     {
       "type": "folder",
@@ -94,6 +102,7 @@ Or edit it from **Settings > General > Global Hotkey**. The change takes effect 
 **Supported keys:** `A`–`Z`, `0`–`9`, `F1`–`F12`, `Space`, `Tab`, `Esc`, `Enter`, `Backspace`, `Delete`, arrow keys (`Up`/`Down`/`Left`/`Right`), `Home`, `End`, `PageUp`/`PageDown`, `PrintScreen`, `ScrollLock`, `Pause`, `Insert`, `CapsLock`, `NumLock`, numpad keys (`Num0`–`Num9`, `NumAdd`, `NumSubtract`, `NumMultiply`, `NumDivide`, `NumDecimal`, `NumEnter`).
 
 **Examples:**
+
 - `Ctrl+Alt+R` (default)
 - `Ctrl+Shift+F`
 - `Win+Space`
@@ -129,22 +138,22 @@ See [docs/folder-structure.md](docs/folder-structure.md) for the full directory 
 
 ## Documentation
 
-| Document | Description |
-|----------|-------------|
-| [docs/themes.md](docs/themes.md) | Theme system: fields, built-in themes, custom creation |
-| [docs/folder-structure.md](docs/folder-structure.md) | Project directory layout |
-| [docs/technical-reference.md](docs/technical-reference.md) | Module-by-module API reference |
-| [docs/changelog-recent.md](docs/changelog-recent.md) | Recent feature additions and fixes |
+| Document                                                   | Description                                            |
+| ---------------------------------------------------------- | ------------------------------------------------------ |
+| [docs/themes.md](docs/themes.md)                           | Theme system: fields, built-in themes, custom creation |
+| [docs/folder-structure.md](docs/folder-structure.md)       | Project directory layout                               |
+| [docs/technical-reference.md](docs/technical-reference.md) | Module-by-module API reference                         |
+| [docs/changelog-recent.md](docs/changelog-recent.md)       | Recent feature additions and fixes                     |
 
 ## Keyboard shortcuts
 
-| Key | Action |
-|-----|--------|
-| `Ctrl + Alt + R` | Toggle Launchpad visibility |
-| `Esc` | Close context menu / go back to root |
-| `Backspace` | Navigate up one level |
-| `Enter` | Open selected item |
-| Arrow keys | Navigate grid items |
+| Key              | Action                               |
+| ---------------- | ------------------------------------ |
+| `Ctrl + Alt + R` | Toggle Launchpad visibility          |
+| `Esc`            | Close context menu / go back to root |
+| `Backspace`      | Navigate up one level                |
+| `Enter`          | Open selected item                   |
+| Arrow keys       | Navigate grid items                  |
 
 ## Auto-start with Windows
 
@@ -159,11 +168,11 @@ When disabled, the value is removed. No admin rights required.
 
 ## Item types
 
-| Type | Icon | Behavior |
-|------|------|----------|
-| **App** | Extracted from executable (or custom) | Launches the application |
-| **Group** | Yellow folder (or custom) | Navigates into a sub-grid of items |
-| **Folder** | Blue folder (or custom) | Opens the folder in Explorer |
+| Type       | Icon                                  | Behavior                           |
+| ---------- | ------------------------------------- | ---------------------------------- |
+| **App**    | Extracted from executable (or custom) | Launches the application           |
+| **Group**  | Yellow folder (or custom)             | Navigates into a sub-grid of items |
+| **Folder** | Blue folder (or custom)               | Opens the folder in Explorer       |
 
 ## Building
 
