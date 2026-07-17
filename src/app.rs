@@ -1346,8 +1346,12 @@ fn find_external_icons(config: &Config, icons_dir: &std::path::Path) -> Vec<(Ite
                 LaunchItem::Folder(f) => &f.icon_path,
             };
             if let Some(ref p) = icon_path {
-                // Check if the icon is NOT inside the icons directory
-                if !p.starts_with(icons_dir) {
+                // External = has a parent directory that is NOT the icons folder.
+                // Bare filenames (e.g. "uuid.ico") are already in the new format.
+                let is_external = p.parent().map_or(false, |parent| {
+                    !parent.as_os_str().is_empty() && parent != icons_dir
+                });
+                if is_external {
                     out.push((item.id(), p.clone()));
                 }
             }
