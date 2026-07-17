@@ -262,19 +262,24 @@ The configuration system is built around a single `Config` struct that holds all
 
 #### Config file resolution
 
-`ConfigManager::new()` determines the config file path using a two-tier strategy:
+`ConfigManager::new()` resolves the config path through a four-step decision chain:
 
-1. **Portable mode** — If `config.json` exists in the same directory as the executable, it is used directly. No files are written to `%APPDATA%`. This enables fully portable deployments: drop the exe and config in a folder and run.
-2. **AppData mode** (default) — Otherwise, the config lives at `%APPDATA%/Launchpad/config.json` (via `dirs::config_dir()`). The `Launchpad` directory is created if it doesn't exist.
+1. **Existing portable** — If `config.json` already exists next to the executable, use it (no prompt).
+2. **Existing AppData** — If `%APPDATA%/Launchpad/config.json` already exists, use it (no prompt).
+3. **First-run dialog** — If no config exists anywhere, a native dialog asks the user to choose:
+   - **Yes = Portable mode**: config stored next to the exe (ideal for USB drives).
+   - **No = Normal mode**: config stored in `%APPDATA%/Launchpad/` (recommended for installed apps).
+   - If portable is chosen but the exe directory is read-only (e.g. `Program Files`), a warning appears and the app falls back to AppData.
+4. **Fallback** — AppData mode (either chosen by user, or as fallback from failed portable).
 
 | Mode | Location | When used |
 |---|---|---|
-| Portable | `<exe_dir>/config.json` | File exists next to the exe |
-| AppData | `%APPDATA%/Launchpad/config.json` | No portable config found |
+| Portable | `<exe_dir>/config.json` | Already exists, or user chose it on first run |
+| AppData | `%APPDATA%/Launchpad/config.json` | Default, or user chose it, or portable fallback |
 
 #### First-startup seeding
 
-When `ConfigManager::load()` is called and no config file exists on disk, it creates one by serializing `Config::default()` — a complete snapshot of every setting with its default value. This ensures:
+When the config path is determined and no file exists yet, a default config is seeded — either during `new()` (portable mode) or `load()` (AppData mode). The seed is `Config::default()` serialized as pretty-printed JSON, containing every setting key with its default value. This ensures:
 
 - All keys are present from the start (no "missing key" surprises later)
 - Users can inspect and hand-edit the file with full context

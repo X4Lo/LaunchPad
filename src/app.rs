@@ -1469,6 +1469,8 @@ impl LaunchpadApp {
 // ─── Drag & Drop ─────────────────────────────────────────
 impl LaunchpadApp {
     fn handle_dropped_files(&mut self, ctx: &egui::Context) {
+        // If we're inside a group, add to that group instead of root
+        let target_group = self.nav_stack.last().copied();
         for file in &ctx.input(|i| i.raw.dropped_files.clone()) {
             if let Some(ref path) = file.path {
                 let path = std::path::PathBuf::from(path);
@@ -1478,7 +1480,16 @@ impl LaunchpadApp {
                         .and_then(|n| n.to_str())
                         .unwrap_or("Folder")
                         .to_string();
-                    commands::items::add_folder(&mut self.config, title, path);
+                    if let Some(gid) = target_group {
+                        let _ = commands::items::add_folder_to_group(
+                            &mut self.config,
+                            gid,
+                            title,
+                            path,
+                        );
+                    } else {
+                        commands::items::add_folder(&mut self.config, title, path);
+                    }
                 } else {
                     let ext = path
                         .extension()
@@ -1491,7 +1502,16 @@ impl LaunchpadApp {
                             .and_then(|n| n.to_str())
                             .unwrap_or("App")
                             .to_string();
-                        commands::items::add_app(&mut self.config, title, path);
+                        if let Some(gid) = target_group {
+                            let _ = commands::items::add_app_to_group(
+                                &mut self.config,
+                                gid,
+                                title,
+                                path,
+                            );
+                        } else {
+                            commands::items::add_app(&mut self.config, title, path);
+                        }
                     }
                 }
                 self.mark_dirty();

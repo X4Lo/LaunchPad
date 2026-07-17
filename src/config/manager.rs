@@ -238,18 +238,76 @@ impl ConfigManager {
     }
 
     pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
-        // Portable mode: if config.json exists next to the exe, use it.
+        // 1. Portable mode: if config.json already exists next to the exe, use it.
         if let Some(portable) = Self::portable_config_path() {
             return Ok(Self {
                 config_path: portable,
             });
         }
-        let data_dir = dirs::config_dir()
+
+        let appdata_dir = dirs::config_dir()
             .ok_or("Could not determine config directory")?
             .join("Launchpad");
-        std::fs::create_dir_all(&data_dir)?;
+        let appdata_path = appdata_dir.join("config.json");
+
+        // 2. If AppData config already exists, use it (no prompt needed).
+        if appdata_path.exists() {
+            std::fs::create_dir_all(&appdata_dir)?;
+            return Ok(Self {
+                config_path: appdata_path,
+            });
+        }
+
+        // 3. First run — no config exists anywhere. Ask the user which mode.
+        let use_portable = rfd::MessageDialog::new()
+            .set_title("Launchpad — First Run Setup")
+            .set_description(
+                "Where should Launchpad store its settings?\n\n\
+                 Click 'Yes' for portable mode:\n\
+                 \u{2022} config.json saved next to the executable\n\
+                 \u{2022} Ideal for USB drives or portable use\n\n\
+                 Click 'No' for normal mode:\n\
+                 \u{2022} config.json saved in AppData folder\n\
+                 \u{2022} Recommended for installed applications",
+            )
+            .set_buttons(rfd::MessageButtons::YesNo)
+            .set_level(rfd::MessageLevel::Info)
+            .show();
+
+        if use_portable == rfd::MessageDialogResult::Yes {
+            if let Some(exe_dir) = std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+            {
+                let portable_path = exe_dir.join("config.json");
+                // Seed with default config so load() finds a valid file.
+                let default_config = Config::default();
+                let json = serde_json::to_string_pretty(&default_config).unwrap_or_default();
+                if std::fs::write(&portable_path, &json).is_ok() {
+                    log::info!("Portable config created at: {}", portable_path.display());
+                    return Ok(Self {
+                        config_path: portable_path,
+                    });
+                }
+            }
+            // Portable mode failed — warn and fall back to AppData.
+            log::warn!("Could not create portable config, falling back to AppData");
+            rfd::MessageDialog::new()
+                .set_title("Launchpad")
+                .set_description(
+                    "Could not write config file in portable location.\n\
+                     (The executable directory may be read-only.)\n\n\
+                     Falling back to AppData storage.",
+                )
+                .set_buttons(rfd::MessageButtons::Ok)
+                .set_level(rfd::MessageLevel::Warning)
+                .show();
+        }
+
+        // 4. Normal mode (AppData) or fallback from failed portable.
+        std::fs::create_dir_all(&appdata_dir)?;
         Ok(Self {
-            config_path: data_dir.join("config.json"),
+            config_path: appdata_path,
         })
     }
 
