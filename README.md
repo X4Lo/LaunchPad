@@ -2,6 +2,8 @@
 
 A lightweight, minimalistic desktop application launcher for Windows. Keep your most-used apps one hotkey away — no more hunting through the Start menu or cluttered desktops.
 
+![Launchpad Screenshot](resources/launchpad.webp)
+
 > 🤖 This project was entirely AI-coded (Zed Agent + DeepSeek V4 Pro + Claude) — from architecture design through implementation, UI polish, and documentation.
 
 ## Features
