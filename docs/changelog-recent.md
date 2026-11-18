@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.0.0
+
+### Themes
+- Appearance shows themes as a grid of preview cards instead of a list.
+- **Create theme**: a theme editor with live preview (background, cards, hover, accent, borders, text). Custom themes get an edit button on their card; they can be renamed or deleted.
+- Custom themes in `config.json` load reliably: only untouched copies of the old built-ins are cleaned up. Edited ones are kept, renamed "Name (custom)" if they clash with a built-in.
+
+### Fixes
+- Dragging a tile to reorder now stays under the pointer (it used to lag behind it).
+- Editing `config.json` while Launchpad runs no longer gets overwritten: the file is reloaded when you open the launcher or settings, and before saving.
+- A `config.json` with a syntax error is backed up to `config.invalid.json` instead of being silently replaced by defaults.
+
+### Project
+- README restyled (header, documentation, credits, license), `CONTRIBUTING.md` and `LICENSE.md` added.
+
 ## 0.2.0 — UI rework (Slint)
 
 The egui interface was replaced with a Slint UI built on the same design system as HushKey.

@@ -9,6 +9,7 @@ Launchpad/
 ├── docs/
 │   ├── technical-reference.md  # How it works (threads, controller, UI, icons)
 │   ├── themes.md               # Built-in and custom themes
+│   ├── assets/icon.png         # README icon (rendered from src/ui/icon.rs)
 │   ├── changelog-recent.md
 │   ├── folder-structure.md     # This file
 │   └── Architecture & Implementation Plan.md   # Original (egui-era) plan, historical

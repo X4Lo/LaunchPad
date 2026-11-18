@@ -36,7 +36,7 @@ How the pieces fit together. For the file layout see [folder-structure.md](folde
 - `theme.slint` — the `Theme` global (design tokens). Its `ThemeColors` struct is pushed from Rust (`src/ui/theme.rs`) into **each** window, because Slint globals are per window.
 - `widgets.slint` — shared building blocks: stroke glyphs (each a constant SVG path, validated at compile time), `IconButton`, `Button`, `TextField`, `Tabs`, `Switch`, `ShortcutChip`, `SettingRow`, `Card`, `Slider`, `MenuEntry`, `MenuPanel`.
 - `main.slint` — `MainWindow`: header, search, the icon grid (positions computed from the window width; auto-fit asks Rust via a `pure callback`), drag-to-reorder / drop-into-group, item & add menus (`PopupWindow`), modal dialogs, drop overlay, status banner with Undo.
-- `settings.slint` — `SettingsWindow` with General / Appearance / About tabs and shortcut recording.
+- `settings.slint` — `SettingsWindow` with General / Appearance / About tabs, shortcut recording, the theme grid and the theme editor.
 
 Keyboard handling uses `FocusScope.capture-key-pressed`, so arrows / Enter / Esc drive the grid while typed characters still reach the search box.
 
@@ -57,7 +57,7 @@ Root holds apps, folders and groups; groups hold apps and folders (no nesting). 
 
 ## Config (`src/config/manager.rs`)
 
-JSON, unchanged format (older configs load as-is). Portable mode = `config.json` next to the exe; otherwise `%APPDATA%\Launchpad\config.json`. Saves are atomic (write `.tmp`, rename). Copies of the old built-in themes that the egui version wrote into `themes` are dropped on load.
+JSON, unchanged format (older configs load as-is). If the file is edited while Launchpad runs, it's reloaded (on show, on opening Settings, and before any save) instead of being overwritten; a file that doesn't parse is backed up to `config.invalid.json` at startup and never overwritten during a reload. Portable mode = `config.json` next to the exe; otherwise `%APPDATA%\Launchpad\config.json`. Saves are atomic (write `.tmp`, rename). Copies of the old built-in themes that the egui version wrote into `themes` are dropped on load.
 
 ## Commands
 

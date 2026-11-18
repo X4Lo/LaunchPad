@@ -1,4 +1,6 @@
+use std::cell::Cell;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 
@@ -60,9 +62,31 @@ pub fn expand_path(path: &Path) -> PathBuf {
     PathBuf::from(format!("{}{drive}{}", &s[..at], &s[at + VAR.len()..]))
 }
 
-/// Names the egui version wrote into `config.json` as copies of its built-ins.
-/// They are dropped on load: the built-ins now live in code.
-const LEGACY_BUILTIN_THEMES: [&str; 4] = ["Default", "Dracula", "Nord", "Catppuccin"];
+/// The egui version wrote unmodified copies of its built-ins into `config.json`
+/// (name, header, body, widget, selection). Those exact copies are dropped on load,
+/// since the built-ins now live in code; edited ones are kept as custom themes.
+const LEGACY_BUILTIN_THEMES: [(&str, &str, &str, &str, &str); 4] = [
+    ("Default", "313337", "1F2127", "3A3C42", "606268"),
+    ("Dracula", "282A36", "21222C", "44475A", "6272A4"),
+    ("Nord", "2E3440", "242933", "3B4252", "5E81AC"),
+    ("Catppuccin", "1E1E2E", "181825", "313244", "CBA6F7"),
+];
+
+/// Names a custom theme can't use (the built-ins in `ui::theme`).
+pub const RESERVED_THEME_NAMES: [&str; 5] = ["Dark", "Light", "Dracula", "Nord", "Catppuccin"];
+
+fn is_legacy_copy(t: &Theme) -> bool {
+    let eq = |v: &Option<String>, want: &str| {
+        v.as_deref().is_some_and(|x| x.trim_start_matches('#').eq_ignore_ascii_case(want))
+    };
+    LEGACY_BUILTIN_THEMES.iter().any(|(name, header, body, widget, selection)| {
+        t.name.eq_ignore_ascii_case(name)
+            && eq(&t.header_color, header)
+            && eq(&t.body_color, body)
+            && eq(&t.widget_color, widget)
+            && eq(&t.selection_color, selection)
+    })
+}
 
 // ─── Config ──────────────────────────────────────────────
 
@@ -161,8 +185,19 @@ impl Default for Config {
 impl Config {
     /// Clamp values a hand-edited or older config may have out of range.
     fn sanitize(&mut self) {
-        self.themes.retain(|t| !LEGACY_BUILTIN_THEMES.iter().any(|b| t.name.eq_ignore_ascii_case(b)));
-        if self.selected_theme.as_deref().is_some_and(|n| n.eq_ignore_ascii_case("Default")) {
+        self.themes.retain(|t| !is_legacy_copy(t) && !t.name.trim().is_empty());
+        // An edited theme named like a built-in becomes "Name (custom)".
+        for t in &mut self.themes {
+            if RESERVED_THEME_NAMES.iter().any(|r| t.name.trim().eq_ignore_ascii_case(r)) {
+                let renamed = format!("{} (custom)", t.name.trim());
+                if self.selected_theme.as_deref().is_some_and(|s| s.eq_ignore_ascii_case(&t.name)) {
+                    self.selected_theme = Some(renamed.clone());
+                }
+                t.name = renamed;
+            }
+        }
+        let has_custom = |n: &str| self.themes.iter().any(|t| t.name.eq_ignore_ascii_case(n));
+        if self.selected_theme.as_deref().is_some_and(|n| n.eq_ignore_ascii_case("Default") && !has_custom(n)) {
             self.selected_theme = None;
         }
         if !self.grid_icon_size.is_finite() {
@@ -182,6 +217,8 @@ pub struct ConfigManager {
     config_path: PathBuf,
     /// true when no config file exists anywhere — app should show first-run setup.
     pub pending_first_run: bool,
+    /// Modification time of config.json when we last read or wrote it.
+    last_sync: Cell<Option<SystemTime>>,
 }
 
 impl ConfigManager {
@@ -206,15 +243,15 @@ impl ConfigManager {
     /// and the app asks the user where to store it before anything is written.
     pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
         if let Some(portable) = Self::portable_config_path() {
-            return Ok(Self { config_path: portable, pending_first_run: false });
+            return Ok(Self { config_path: portable, pending_first_run: false, last_sync: Cell::new(None) });
         }
         let appdata_dir = Self::appdata_dir().ok_or("Could not determine config directory")?;
         let appdata_path = appdata_dir.join("config.json");
         if appdata_path.exists() {
-            return Ok(Self { config_path: appdata_path, pending_first_run: false });
+            return Ok(Self { config_path: appdata_path, pending_first_run: false, last_sync: Cell::new(None) });
         }
         log::info!("First run detected — deferring setup to in-app dialog");
-        Ok(Self { config_path: appdata_path, pending_first_run: true })
+        Ok(Self { config_path: appdata_path, pending_first_run: true, last_sync: Cell::new(None) })
     }
 
     pub fn path(&self) -> &Path {
@@ -259,21 +296,31 @@ impl ConfigManager {
         }
     }
 
-    /// Load config from disk. If pending first run, returns defaults without saving.
-    pub fn load(&self) -> Config {
+    /// Load config at startup. If pending first run, returns defaults without saving.
+    ///
+    /// A file that doesn't parse is copied to `config.invalid.json` before defaults are
+    /// used, so the next save can never silently wipe a hand-edited config. The error
+    /// is returned alongside so the UI can say so.
+    pub fn load(&self) -> (Config, Option<String>) {
         if self.pending_first_run || !self.config_path.exists() {
-            return Config::default();
+            return (Config::default(), None);
         }
-        let mut config: Config = match std::fs::read_to_string(&self.config_path) {
-            Ok(s) => serde_json::from_str(&s).unwrap_or_else(|e| {
-                log::warn!("Failed to parse config, using defaults: {e}");
-                Config::default()
-            }),
+        match self.try_load() {
+            Ok(c) => (c, None),
             Err(e) => {
-                log::warn!("Failed to read config, using defaults: {e}");
-                Config::default()
+                let backup = self.config_path.with_file_name("config.invalid.json");
+                let _ = std::fs::copy(&self.config_path, &backup);
+                log::warn!("{e}; backed up to {}", backup.display());
+                (Config::default(), Some(format!("{e}. The file was backed up to config.invalid.json.")))
             }
-        };
+        }
+    }
+
+    /// Read and parse the file without any fallback.
+    pub fn try_load(&self) -> Result<Config, String> {
+        let text = std::fs::read_to_string(&self.config_path).map_err(|e| format!("Couldn't read config.json: {e}"))?;
+        let mut config: Config = serde_json::from_str(&text).map_err(|e| format!("config.json has an error ({e})"))?;
+        self.last_sync.set(self.modified());
         config.sanitize();
 
         // Sync auto-start with the real registry state (the user may have removed it).
@@ -282,7 +329,17 @@ impl ConfigManager {
             log::info!("Auto-start mismatch: config={}, system={actual}. Syncing.", config.auto_start);
             config.auto_start = actual;
         }
-        config
+        Ok(config)
+    }
+
+    fn modified(&self) -> Option<SystemTime> {
+        std::fs::metadata(&self.config_path).and_then(|m| m.modified()).ok()
+    }
+
+    /// True when config.json was changed by something else (e.g. edited by hand)
+    /// since we last read or wrote it.
+    pub fn changed_externally(&self) -> bool {
+        !self.pending_first_run && self.modified().is_some() && self.modified() != self.last_sync.get()
     }
 
     pub fn save(&self, config: &Config) -> Result<(), Box<dyn std::error::Error>> {
@@ -293,6 +350,7 @@ impl ConfigManager {
         let tmp_path = self.config_path.with_extension("tmp");
         std::fs::write(&tmp_path, &json)?;
         std::fs::rename(&tmp_path, &self.config_path)?;
+        self.last_sync.set(self.modified());
         Ok(())
     }
 }
@@ -319,6 +377,25 @@ mod tests {
     }
 
     #[test]
+    fn untouched_legacy_copies_are_dropped_edited_ones_kept() {
+        let json = r#"{
+            "themes": [
+                {"name": "Dracula", "header_color": "282A36", "body_color": "21222C",
+                 "widget_color": "44475A", "selection_color": "6272A4"},
+                {"name": "Nord", "header_color": "2E3440", "body_color": "000000",
+                 "widget_color": "3B4252", "selection_color": "5E81AC"},
+                {"name": "Ocean", "body_color": "0b1d2a"}
+            ],
+            "selected_theme": "Nord"
+        }"#;
+        let mut cfg: Config = serde_json::from_str(json).unwrap();
+        cfg.sanitize();
+        let names: Vec<&str> = cfg.themes.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, ["Nord (custom)", "Ocean"]);
+        assert_eq!(cfg.selected_theme.as_deref(), Some("Nord (custom)"));
+    }
+
+    #[test]
     fn legacy_config_loads_and_drops_builtin_copies() {
         let json = r#"{
             "items": [],
@@ -328,9 +405,10 @@ mod tests {
         }"#;
         let mut cfg: Config = serde_json::from_str(json).unwrap();
         cfg.sanitize();
-        assert_eq!(cfg.themes.len(), 1);
-        assert_eq!(cfg.themes[0].name, "Mine");
-        assert_eq!(cfg.selected_theme, None);
+        // "Default" here isn't the untouched legacy copy (no header etc.), so it stays.
+        assert_eq!(cfg.themes.len(), 2);
+        assert_eq!(cfg.themes[1].name, "Mine");
+        assert_eq!(cfg.selected_theme.as_deref(), Some("Default"));
         assert_eq!(cfg.grid_icon_size, 128.0);
         assert!(cfg.hotkey_on_release, "missing field uses its default");
     }

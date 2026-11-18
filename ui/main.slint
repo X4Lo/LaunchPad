@@ -643,10 +643,16 @@ export component MainWindow inherits Window {
                             root.selected = i;
                             root.open-menu(tile, tv.absolute-position.x + mx, tv.absolute-position.y + my);
                         }
+                        // dx/dy are measured inside the tile, which itself follows the
+                        // pointer, so they're the remaining gap: accumulate them.
                         drag-move(dx, dy) => {
-                            root.drag-from = i;
-                            root.drag-dx = dx;
-                            root.drag-dy = dy;
+                            if (root.drag-from != i) {
+                                root.drag-from = i;
+                                root.drag-dx = 0;
+                                root.drag-dy = 0;
+                            }
+                            root.drag-dx += dx;
+                            root.drag-dy += dy;
                         }
                         drag-end => {
                             if (root.drag-from >= 0) {

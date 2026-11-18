@@ -3,8 +3,8 @@
 import { ScrollView, Palette } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import {
-    KeyboardGlyph, CheckGlyph, FolderGlyph, Tabs, Switch, ShortcutChip, SettingRow, Card, Divider, SectionLabel,
-    Slider, Button
+    KeyboardGlyph, CheckGlyph, PencilGlyph, PlusGlyph, Tabs, Switch, ShortcutChip, SettingRow, Card, Divider,
+    SectionLabel, Slider, Button, TextField
 } from "widgets.slint";
 
 export struct ThemeOption {
@@ -16,80 +16,188 @@ export struct ThemeOption {
     custom: bool,
 }
 
-component ThemeRow inherits Rectangle {
+// A theme as a card: a miniature window in the theme's colours, then its name.
+component ThemeCard inherits Rectangle {
     in property <ThemeOption> option;
     in property <bool> current;
     callback picked();
-    height: 52px;
-    background: touch.has-hover ? Theme.surface-hover : transparent;
+    callback edit();
+
+    border-radius: 12px;
+    background: touch.has-hover ? Theme.surface-hover : Theme.surface;
+    border-width: root.current ? 2px : 1px;
+    border-color: root.current ? Theme.accent : (touch.has-hover ? Theme.border-strong : Theme.border);
+    animate background, border-color { duration: Theme.fast; }
     accessible-role: button;
-    accessible-label: root.option.name + " theme";
+    accessible-label: root.option.name + " theme" + (root.current ? ", selected" : "");
     accessible-action-default => { root.picked(); }
-    HorizontalLayout {
-        padding-left: 14px;
-        padding-right: 16px;
-        spacing: 12px;
-        // Mini window preview: background, a tile and the accent.
-        VerticalLayout {
-            alignment: center;
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.picked(); }
+    }
+
+    // Preview
+    Rectangle {
+        x: 7px;
+        y: 7px;
+        width: parent.width - 14px;
+        height: 60px;
+        border-radius: 8px;
+        background: root.option.bg;
+        border-width: 1px;
+        border-color: #8080801f;
+        Rectangle {
+            x: 8px;
+            y: 8px;
+            width: parent.width * 0.42;
+            height: parent.height - 16px;
+            border-radius: 6px;
+            background: root.option.surface;
             Rectangle {
-                width: 46px;
-                height: 32px;
-                border-radius: 8px;
-                background: root.option.bg;
-                border-width: 1px;
-                border-color: root.current ? Theme.accent : Theme.border-strong;
-                Rectangle {
-                    x: 6px;
-                    y: 6px;
-                    width: 15px;
-                    height: 15px;
-                    border-radius: 4px;
-                    background: root.option.surface;
-                }
-                Rectangle {
-                    x: 25px;
-                    y: 6px;
-                    width: 15px;
-                    height: 15px;
-                    border-radius: 4px;
-                    background: root.option.accent;
-                }
-                Rectangle {
-                    x: 6px;
-                    y: 24px;
-                    width: 26px;
-                    height: 3px;
-                    border-radius: 1.5px;
-                    background: root.option.text;
-                    opacity: 0.7;
-                }
+                x: 6px;
+                y: 7px;
+                width: parent.width - 12px;
+                height: 4px;
+                border-radius: 2px;
+                background: root.option.text;
+                opacity: 0.8;
+            }
+            Rectangle {
+                x: 6px;
+                y: 15px;
+                width: (parent.width - 12px) * 0.6;
+                height: 4px;
+                border-radius: 2px;
+                background: root.option.text;
+                opacity: 0.4;
             }
         }
-        VerticalLayout {
-            alignment: center;
-            spacing: 1px;
+        Rectangle {
+            x: parent.width * 0.42 + 16px;
+            y: 8px;
+            width: 20px;
+            height: 20px;
+            border-radius: 6px;
+            background: root.option.accent;
+        }
+        Rectangle {
+            x: parent.width * 0.42 + 16px;
+            y: 34px;
+            width: max(0px, parent.width * 0.58 - 26px);
+            height: 5px;
+            border-radius: 2.5px;
+            background: root.option.text;
+            opacity: 0.55;
+        }
+    }
+
+    HorizontalLayout {
+        y: 72px;
+        height: parent.height - 72px;
+        padding-left: 10px;
+        padding-right: 6px;
+        spacing: 4px;
+        Text {
+            text: root.option.name;
+            font-size: 12.5px;
+            font-weight: root.current ? 700 : 500;
+            color: Theme.text;
+            vertical-alignment: center;
+            overflow: elide;
             horizontal-stretch: 1;
-            Text {
-                text: root.option.name;
-                font-size: 13px;
-                font-weight: root.current ? 700 : 500;
-                color: Theme.text;
-            }
-            if root.option.custom: Text {
-                text: "Custom theme from config.json";
-                font-size: 11px;
-                color: Theme.text-faint;
-            }
         }
         if root.current: VerticalLayout {
             alignment: center;
-            CheckGlyph { stroke: Theme.accent; stroke-width: 2.2px; }
+            CheckGlyph { width: 15px; height: 15px; stroke: Theme.accent; stroke-width: 2.2px; }
+        }
+        if root.option.custom: VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 26px;
+                height: 26px;
+                border-radius: 7px;
+                background: edit-touch.has-hover ? Theme.border : transparent;
+                accessible-role: button;
+                accessible-label: "Edit " + root.option.name;
+                accessible-action-default => { root.edit(); }
+                PencilGlyph { width: 14px; height: 14px; }
+                edit-touch := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.edit(); }
+                }
+            }
+        }
+    }
+}
+
+component CreateThemeCard inherits Rectangle {
+    callback clicked();
+    border-radius: 12px;
+    border-width: 1px;
+    border-color: touch.has-hover ? Theme.accent : Theme.border-strong;
+    background: touch.has-hover ? Theme.accent-soft : transparent;
+    animate background, border-color { duration: Theme.fast; }
+    accessible-role: button;
+    accessible-label: "Create theme";
+    accessible-action-default => { root.clicked(); }
+    VerticalLayout {
+        alignment: center;
+        spacing: 8px;
+        HorizontalLayout {
+            alignment: center;
+            Rectangle {
+                width: 36px;
+                height: 36px;
+                border-radius: 18px;
+                background: Theme.accent-soft;
+                PlusGlyph { width: 18px; height: 18px; stroke: Theme.accent; stroke-width: 2.2px; }
+            }
+        }
+        Text {
+            text: "Create theme";
+            font-size: 12.5px;
+            font-weight: 600;
+            color: Theme.text;
+            horizontal-alignment: center;
         }
     }
     touch := TouchArea {
         mouse-cursor: pointer;
-        clicked => { root.picked(); }
+        clicked => { root.clicked(); }
+    }
+}
+
+// Label + live swatch + hex field.
+component ColorField inherits VerticalLayout {
+    in property <string> label;
+    in-out property <string> value;
+    in property <color> swatch;
+    in property <bool> valid: true;
+    spacing: 4px;
+    horizontal-stretch: 1;
+    Text {
+        text: root.label;
+        font-size: 11.5px;
+        font-weight: 600;
+        color: Theme.text-muted;
+    }
+    HorizontalLayout {
+        spacing: 8px;
+        Rectangle {
+            width: 32px;
+            height: 32px;
+            border-radius: 8px;
+            background: root.swatch;
+            border-width: 1px;
+            border-color: root.valid ? Theme.border-strong : Theme.danger;
+        }
+        TextField {
+            height: 32px;
+            horizontal-stretch: 1;
+            text <=> root.value;
+            placeholder: "#RRGGBB";
+        }
     }
 }
 
@@ -138,6 +246,25 @@ export component SettingsWindow inherits Window {
     callback open-config-dir();
     callback open-url(string);
 
+    // Theme editor ("" name = closed)
+    in property <bool> editor-open;
+    in property <bool> editor-new;
+    in property <string> editor-error;
+    in-out property <string> ed-name;
+    in-out property <string> ed-bg;
+    in-out property <string> ed-surface;
+    in-out property <string> ed-hover;
+    in-out property <string> ed-accent;
+    in-out property <string> ed-border;
+    in-out property <string> ed-text;
+    callback create-theme();
+    callback edit-theme(int);
+    callback save-theme();
+    callback cancel-theme();
+    callback delete-theme();
+    pure callback hex-color(string) -> color;
+    pure callback hex-valid(string) -> bool;
+
     init => {
         Palette.color-scheme = root.dark ? ColorScheme.dark : ColorScheme.light;
     }
@@ -157,6 +284,10 @@ export component SettingsWindow inherits Window {
     // Receives the key combo while the shortcut chip is recording.
     key-sink := FocusScope {
         key-pressed(event) => {
+            if (root.editor-open && event.text == Key.Escape) {
+                root.cancel-theme();
+                return accept;
+            }
             if (root.capturing) {
                 root.key-captured(event.text, event.modifiers.control, event.modifiers.alt, event.modifiers.shift, event.modifiers.meta);
                 return accept;
@@ -304,17 +435,29 @@ export component SettingsWindow inherits Window {
                     if root.page == 1: VerticalLayout {
                         spacing: 10px;
                         SectionLabel { text: "THEME"; }
-                        Card {
-                            clip: true;
-                            VerticalLayout {
-                                for option[i] in root.themes: VerticalLayout {
-                                    if i > 0: Divider { }
-                                    ThemeRow {
-                                        option: option;
-                                        current: i == root.theme-index;
-                                        picked => { root.pick-theme(i); }
-                                    }
-                                }
+                        Rectangle {
+                            property <length> gap: 10px;
+                            property <int> cols: max(2, floor((self.width + self.gap) / (150px + self.gap)));
+                            property <length> card-w: (self.width - (self.cols - 1) * self.gap) / self.cols;
+                            property <length> card-h: 106px;
+                            property <int> count: root.themes.length + 1;   // + "Create theme"
+                            height: ceil(self.count / self.cols) * (self.card-h + self.gap) - self.gap;
+                            for option[i] in root.themes: ThemeCard {
+                                x: mod(i, parent.cols) * (parent.card-w + parent.gap);
+                                y: floor(i / parent.cols) * (parent.card-h + parent.gap);
+                                width: parent.card-w;
+                                height: parent.card-h;
+                                option: option;
+                                current: i == root.theme-index;
+                                picked => { root.pick-theme(i); }
+                                edit => { root.edit-theme(i); }
+                            }
+                            CreateThemeCard {
+                                x: mod(root.themes.length, parent.cols) * (parent.card-w + parent.gap);
+                                y: floor(root.themes.length / parent.cols) * (parent.card-h + parent.gap);
+                                width: parent.card-w;
+                                height: parent.card-h;
+                                clicked => { root.create-theme(); }
                             }
                         }
 
@@ -450,6 +593,146 @@ export component SettingsWindow inherits Window {
                             font-size: 11px;
                             color: Theme.text-faint;
                             wrap: word-wrap;
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── Theme editor ──
+        if root.editor-open: Rectangle {
+            background: Theme.scrim;
+            TouchArea { }   // modal: swallow clicks on the scrim
+            VerticalLayout {
+                alignment: center;
+                padding: 16px;
+                HorizontalLayout {
+                    alignment: center;
+                    Rectangle {
+                        width: min(480px, root.width - 32px);
+                        background: Theme.surface;
+                        border-radius: 16px;
+                        border-width: 1px;
+                        border-color: Theme.border-strong;
+                        drop-shadow-blur: 30px;
+                        drop-shadow-offset-y: 10px;
+                        drop-shadow-color: #00000070;
+                        TouchArea { }
+                        VerticalLayout {
+                            padding: 20px;
+                            spacing: 12px;
+                            Text {
+                                text: root.editor-new ? "Create theme" : "Edit theme";
+                                font-size: 16px;
+                                font-weight: 700;
+                                color: Theme.text;
+                            }
+
+                            // Live preview with the colours being edited.
+                            Rectangle {
+                                height: 74px;
+                                border-radius: 10px;
+                                background: root.hex-color(root.ed-bg);
+                                border-width: 1px;
+                                border-color: root.hex-color(root.ed-border);
+                                HorizontalLayout {
+                                    padding: 12px;
+                                    spacing: 12px;
+                                    Rectangle {
+                                        border-radius: 8px;
+                                        background: root.hex-color(root.ed-surface);
+                                        border-width: 1px;
+                                        border-color: root.hex-color(root.ed-border);
+                                        horizontal-stretch: 1;
+                                        HorizontalLayout {
+                                            padding-left: 10px;
+                                            padding-right: 10px;
+                                            spacing: 8px;
+                                            Text {
+                                                text: root.ed-name == "" ? "Preview" : root.ed-name;
+                                                font-size: 13px;
+                                                font-weight: 700;
+                                                color: root.hex-color(root.ed-text);
+                                                vertical-alignment: center;
+                                                horizontal-stretch: 1;
+                                                overflow: elide;
+                                            }
+                                        }
+                                    }
+                                    Rectangle {
+                                        width: 86px;
+                                        border-radius: 8px;
+                                        background: root.hex-color(root.ed-hover);
+                                        Text {
+                                            text: "Hover";
+                                            font-size: 12px;
+                                            color: root.hex-color(root.ed-text);
+                                        }
+                                    }
+                                    Rectangle {
+                                        width: 86px;
+                                        border-radius: 8px;
+                                        background: root.hex-color(root.ed-accent);
+                                        Text {
+                                            text: "Accent";
+                                            font-size: 12px;
+                                            font-weight: 600;
+                                            color: white;
+                                        }
+                                    }
+                                }
+                            }
+
+                            VerticalLayout {
+                                spacing: 4px;
+                                Text { text: "Name"; font-size: 11.5px; font-weight: 600; color: Theme.text-muted; }
+                                TextField {
+                                    text <=> root.ed-name;
+                                    placeholder: "My theme";
+                                    init => { self.focus-input(); self.select-all(); }
+                                    accepted => { root.save-theme(); }
+                                }
+                            }
+                            HorizontalLayout {
+                                spacing: 12px;
+                                ColorField { label: "Background"; value <=> root.ed-bg; swatch: root.hex-color(root.ed-bg); valid: root.hex-valid(root.ed-bg); }
+                                ColorField { label: "Cards & menus"; value <=> root.ed-surface; swatch: root.hex-color(root.ed-surface); valid: root.hex-valid(root.ed-surface); }
+                            }
+                            HorizontalLayout {
+                                spacing: 12px;
+                                ColorField { label: "Hover"; value <=> root.ed-hover; swatch: root.hex-color(root.ed-hover); valid: root.hex-valid(root.ed-hover); }
+                                ColorField { label: "Accent"; value <=> root.ed-accent; swatch: root.hex-color(root.ed-accent); valid: root.hex-valid(root.ed-accent); }
+                            }
+                            HorizontalLayout {
+                                spacing: 12px;
+                                ColorField { label: "Borders"; value <=> root.ed-border; swatch: root.hex-color(root.ed-border); valid: root.hex-valid(root.ed-border); }
+                                ColorField { label: "Text"; value <=> root.ed-text; swatch: root.hex-color(root.ed-text); valid: root.hex-valid(root.ed-text); }
+                            }
+                            if root.editor-error != "": Text {
+                                text: root.editor-error;
+                                font-size: 12px;
+                                color: Theme.danger;
+                                wrap: word-wrap;
+                            }
+                            HorizontalLayout {
+                                spacing: 8px;
+                                padding-top: 4px;
+                                if !root.editor-new: Button {
+                                    text: "Delete";
+                                    danger: true;
+                                    clicked => { root.delete-theme(); }
+                                }
+                                Rectangle { horizontal-stretch: 1; }
+                                Button {
+                                    text: "Cancel";
+                                    clicked => { root.cancel-theme(); }
+                                }
+                                Button {
+                                    text: root.editor-new ? "Create" : "Save";
+                                    primary: true;
+                                    clicked => { root.save-theme(); }
+                                }
+                            }
                         }
                     }
                 }

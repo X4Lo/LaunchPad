@@ -1,10 +1,23 @@
+<div align="center">
+
+<img src="docs/assets/icon.png" alt="Launchpad icon" width="96">
+
 # Launchpad
 
-A lightweight, minimalistic desktop application launcher for Windows. Keep your most-used apps one hotkey away — no more hunting through the Start menu or cluttered desktops.
+**Keep your most-used apps one hotkey away.**
 
-![Launchpad Screenshot](resources/launchpad.webp)
+A lightweight, minimalistic desktop application launcher for Windows. Press a shortcut, type a few letters, hit Enter. Organise apps, folders and shortcuts into groups, drag things in from Explorer, and get back to work.
 
-> 🤖 This project was entirely AI-coded (Zed Agent + DeepSeek V4 Pro + Claude) — from architecture design through implementation, UI polish, and documentation.
+[![License: MIT](https://img.shields.io/badge/License-MIT-7b6bff.svg)](LICENSE.md)
+![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-5b49f2)
+![Rust](https://img.shields.io/badge/rust-stable-orange)
+![Built with Claude Opus 5.5](https://img.shields.io/badge/built%20with-Claude%20Opus%205.5-orange)
+
+<img src="resources/launchpad.webp" alt="Launchpad main window">
+
+</div>
+
+---
 
 ## Features
 
@@ -23,8 +36,8 @@ A lightweight, minimalistic desktop application launcher for Windows. Keep your 
 ### From source
 
 ```bash
-git clone <repo-url>
-cd Launchpad
+git clone https://github.com/X4Lo/LaunchPad.git
+cd LaunchPad
 cargo build --release
 ```
 
@@ -135,19 +148,6 @@ Quick example — add this to your `config.json`:
 
 Built-in themes: **Dark** (default), **Light**, **Dracula**, **Nord**, **Catppuccin**.
 
-## Project structure
-
-See [docs/folder-structure.md](docs/folder-structure.md) for the full directory layout and design rationale.
-
-## Documentation
-
-| Document                                                   | Description                                            |
-| ---------------------------------------------------------- | ------------------------------------------------------ |
-| [docs/themes.md](docs/themes.md)                           | Theme system: fields, built-in themes, custom creation |
-| [docs/folder-structure.md](docs/folder-structure.md)       | Project directory layout                               |
-| [docs/technical-reference.md](docs/technical-reference.md) | Module-by-module API reference                         |
-| [docs/changelog-recent.md](docs/changelog-recent.md)       | Recent feature additions and fixes                     |
-
 ## Keyboard & mouse
 
 | Input              | Action                                   |
@@ -194,17 +194,18 @@ cargo build --release
 
 The release binary is optimized with LTO and stripped for minimal size.
 
-## Tech stack
+## Documentation
 
-- **[Slint](https://slint.dev)** — Declarative native UI, software renderer (no GPU context, no webview); same UI system as HushKey. Used under its royalty-free license (attribution in Settings → About).
-- **[tray-icon](https://crates.io/crates/tray-icon)** — System tray integration
-- **[global-hotkey](https://crates.io/crates/global-hotkey)** — Global keyboard shortcut registration
-- **[auto-launch](https://crates.io/crates/auto-launch)** — Start with Windows
-- **[windows](https://crates.io/crates/windows)** — Shell icon extraction and launching
-- **[image](https://crates.io/crates/image)** — Custom icon decoding (PNG, ICO, JPG, BMP)
-- **[rfd](https://crates.io/crates/rfd)** — Native file dialogs
-- **[serde](https://serde.rs) / serde_json** — Configuration serialization
+- [Technical reference](docs/technical-reference.md) — threads, the app controller, the Slint UI and icon extraction
+- [Themes](docs/themes.md) — built-in themes and how to write your own
+- [Folder structure](docs/folder-structure.md) — where everything lives
+- [Changelog](docs/changelog-recent.md)
+- [Contributing](CONTRIBUTING.md)
+
+## Credits
+
+Developed by X4Lo with the help of AI coding assistants: the original version with Zed Agent and DeepSeek V4 Pro, and the 1.0 rework (Slint UI, icon extraction, theme editor) with **Claude Opus 5.5** (Anthropic), which wrote the code and documentation from X4Lo's specification. The UI design system is shared with [HushKey](https://github.com/X4Lo/HushKey).
 
 ## License
 
-MIT
+[MIT](LICENSE.md). The UI is built with [Slint](https://slint.dev), used under its Royalty-free Desktop license (attribution is shown in the app's About section).

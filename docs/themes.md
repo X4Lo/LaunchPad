@@ -12,11 +12,13 @@ Pick a theme in **Settings → Appearance**. The choice is stored as `selected_t
 | **Nord** | `#242933` | `#2e3440` | `#5e81ac` |
 | **Catppuccin** (Mocha) | `#11111b` | `#1e1e2e` | `#cba6f7` |
 
-Built-ins live in code (`src/ui/theme.rs`) and always appear in the list; they're no longer copied into `config.json`. Old configs that still contain copies named Default / Dracula / Nord / Catppuccin are cleaned up on load, and `"selected_theme": "Default"` means Dark.
+Built-ins live in code (`src/ui/theme.rs`) and always appear in the list; they're no longer copied into `config.json`. Old configs that still contain *unmodified* copies of the old Default / Dracula / Nord / Catppuccin are cleaned up on load (edited ones are kept as custom themes), and `"selected_theme": "Default"` means Dark unless you have a custom theme by that name.
 
 ## Custom themes
 
-Add entries to `themes` in `config.json`; they appear under the built-ins in Settings. Every field except `name` is optional and falls back to Dark. Colors are 6-digit hex, with or without `#`.
+The easiest way is **Settings → Appearance → Create theme**: pick the six colours (hex), watch the live preview, and save. Custom themes show a pencil on their card to edit, rename or delete them.
+
+You can also add entries to `themes` in `config.json` by hand (even while Launchpad runs: it reloads the file when you open it). They appear after the built-ins. Every field except `name` is optional and falls back to Dark. Colors are 6-digit hex, with or without `#`.
 
 ```json
 {
@@ -43,5 +45,7 @@ Add entries to `themes` in `config.json`; they appear under the built-ins in Set
 | `selection_color` | Accent: selection, switches, focus rings, buttons. |
 | `divider_color` | Borders and separators. |
 | `text_color` | Primary text (muted/faint text are derived from it). |
+
+A custom theme can't reuse a built-in name; one that does is shown as "Name (custom)".
 
 `corner_radius`, `grid_spacing` and `grid_icon_size` inside a theme are still accepted but ignored. Icon size and spacing are set in **Settings → Appearance → Layout** (`grid_icon_size`, `grid_spacing` at the top level of `config.json`).

@@ -17,7 +17,7 @@ use slint::winit_030::{EventResult, WinitWindowAccessor};
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 
 use crate::commands::items::{self, Parent};
-use crate::config::manager::{expand_path, Config, ConfigManager};
+use crate::config::manager::{expand_path, Config, ConfigManager, RESERVED_THEME_NAMES};
 use crate::models::item::{ItemId, LaunchItem};
 use crate::platform::autostart;
 use crate::platform::hotkey::{self, capture_from_key_event, Capture, Hotkey};
@@ -93,6 +93,8 @@ pub struct App {
     hotkey: RefCell<Option<Hotkey>>,
     hotkey_error: RefCell<String>,
     capturing: Cell<bool>,
+    /// Theme editor: `None` closed, `Some(None)` creating, `Some(Some(name))` editing.
+    editing_theme: RefCell<Option<Option<String>>>,
     tray: RefCell<Option<Tray>>,
 
     dropped: RefCell<Vec<PathBuf>>,
@@ -107,7 +109,7 @@ pub struct App {
 impl App {
     pub fn start(start_hidden: bool) -> Result<Rc<App>, String> {
         let store = ConfigManager::new().map_err(|e| e.to_string())?;
-        let cfg = store.load();
+        let (cfg, load_error) = store.load();
         log::info!("Config: {} ({} items)", store.path().display(), cfg.items.len());
 
         let window = MainWindow::new().map_err(|e| e.to_string())?;
@@ -135,6 +137,7 @@ impl App {
             hotkey: RefCell::new(None),
             hotkey_error: RefCell::default(),
             capturing: Cell::new(false),
+            editing_theme: RefCell::new(None),
             tray: RefCell::new(None),
             dropped: RefCell::default(),
             geometry_restored: Cell::new(false),
@@ -173,6 +176,9 @@ impl App {
             app.check_icon_migration();
         }
 
+        if let Some(e) = load_error {
+            app.set_status(&e, true, StatusAction::None);
+        }
         app.refresh();
         if !start_hidden || first_run {
             app.show_window();
@@ -319,6 +325,7 @@ impl App {
     // ── Window lifecycle ───────────────────────────────────────────────────────
 
     pub fn show_window(&self) {
+        self.reload_if_changed();
         let w = self.window.window();
         if !self.geometry_restored.get() {
             let cfg = self.cfg.borrow();
@@ -428,10 +435,40 @@ impl App {
 
     fn save_now(&self) {
         self.save_timer.stop();
+        // Edited by hand while we were running: take the file's version rather than
+        // overwriting it (only window geometry or a just-made change is lost).
+        if self.reload_if_changed() {
+            return;
+        }
         if let Err(e) = self.store.borrow().save(&self.cfg.borrow()) {
             log::error!("save: {e}");
             self.set_status(&format!("Couldn't save settings: {e}"), true, StatusAction::None);
         }
+    }
+
+    /// Re-read config.json if something else changed it. Returns true if it did (or
+    /// if the new file doesn't parse, in which case we keep ours and say so).
+    fn reload_if_changed(&self) -> bool {
+        if !self.store.borrow().changed_externally() {
+            return false;
+        }
+        let result = self.store.borrow().try_load();
+        match result {
+            Ok(cfg) => {
+                log::info!("config.json changed on disk; reloading");
+                *self.cfg.borrow_mut() = cfg;
+                self.icons.borrow_mut().retain(|k, _| !matches!(k, IconSource::File(_)));
+                self.apply_theme();
+                self.push_layout();
+                self.apply_hotkey();
+                self.refresh();
+                self.set_status("Reloaded config.json (it was edited outside Launchpad)", false, StatusAction::None);
+            }
+            Err(e) => {
+                self.set_status(&format!("{e} — fix it and Launchpad will pick it up."), true, StatusAction::None)
+            }
+        }
+        true
     }
 
     /// Mutate the config, then save and redraw.
@@ -1140,6 +1177,7 @@ impl App {
     // ── Settings window ────────────────────────────────────────────────────────
 
     fn open_settings(&self) {
+        self.reload_if_changed();
         if self.settings.borrow().is_none() {
             match self.build_settings() {
                 Ok(s) => *self.settings.borrow_mut() = Some(s),
@@ -1174,6 +1212,7 @@ impl App {
             slint::Timer::single_shot(Duration::ZERO, || {
                 with_app(|a| {
                     a.end_capture();
+                    a.editing_theme.borrow_mut().take();
                     a.settings.borrow_mut().take();
                 });
             });
@@ -1227,6 +1266,28 @@ impl App {
             });
         });
         s.on_open_url(|url| shell::open_url(url.as_str()));
+        s.on_hex_color(|text| theme::parse_color(text.as_str()).unwrap_or(slint::Color::from_argb_u8(0, 0, 0, 0)));
+        s.on_hex_valid(|text| theme::parse_color(text.as_str()).is_some());
+        s.on_create_theme(|| {
+            with_app(|a| a.open_theme_editor(None));
+        });
+        s.on_edit_theme(|i| {
+            with_app(|a| {
+                let names = theme::names(&a.cfg.borrow());
+                if let Some(name) = names.get(i as usize).cloned() {
+                    a.open_theme_editor(Some(name));
+                }
+            });
+        });
+        s.on_save_theme(|| {
+            with_app(|a| a.save_theme());
+        });
+        s.on_cancel_theme(|| {
+            with_app(|a| a.close_theme_editor());
+        });
+        s.on_delete_theme(|| {
+            with_app(|a| a.delete_theme());
+        });
         s.on_open_config_dir(|| {
             with_app(|a| {
                 if let Some(dir) = a.store.borrow().path().parent() {
@@ -1235,6 +1296,118 @@ impl App {
             });
         });
         Ok(s)
+    }
+
+    // ── Theme editor ───────────────────────────────────────────────────────────
+
+    /// `None` = create a new theme starting from the current one's colours.
+    fn open_theme_editor(&self, editing: Option<String>) {
+        let settings = self.settings.borrow();
+        let Some(s) = settings.as_ref() else { return };
+        let cfg = self.cfg.borrow();
+        let (name, base) = match &editing {
+            Some(name) => (name.clone(), name.clone()),
+            None => {
+                let taken = theme::names(&cfg);
+                let free = |n: &String| !taken.iter().any(|t| t.eq_ignore_ascii_case(n));
+                let name = std::iter::once("My theme".to_owned())
+                    .chain((2..).map(|i| format!("My theme {i}")))
+                    .find(free)
+                    .unwrap();
+                (name, theme::current_name(&cfg))
+            }
+        };
+        let [bg, surface, hover, accent, border, text] = theme::editable_colors(&cfg, &base);
+        s.set_ed_name(name.into());
+        s.set_ed_bg(bg.into());
+        s.set_ed_surface(surface.into());
+        s.set_ed_hover(hover.into());
+        s.set_ed_accent(accent.into());
+        s.set_ed_border(border.into());
+        s.set_ed_text(text.into());
+        s.set_editor_error(SharedString::new());
+        s.set_editor_new(editing.is_none());
+        s.set_editor_open(true);
+        *self.editing_theme.borrow_mut() = Some(editing);
+    }
+
+    fn close_theme_editor(&self) {
+        self.editing_theme.borrow_mut().take();
+        if let Some(s) = self.settings.borrow().as_ref() {
+            s.set_editor_open(false);
+        }
+    }
+
+    fn save_theme(&self) {
+        let Some(original) = self.editing_theme.borrow().clone() else { return };
+        let (name, colors) = {
+            let settings = self.settings.borrow();
+            let Some(s) = settings.as_ref() else { return };
+            let colors = [
+                s.get_ed_bg(),
+                s.get_ed_surface(),
+                s.get_ed_hover(),
+                s.get_ed_accent(),
+                s.get_ed_border(),
+                s.get_ed_text(),
+            ]
+            .map(|c| c.trim().to_string());
+            (s.get_ed_name().trim().to_string(), colors)
+        };
+        let error = {
+            let cfg = self.cfg.borrow();
+            let clash = |n: &str| {
+                RESERVED_THEME_NAMES.iter().any(|r| r.eq_ignore_ascii_case(n))
+                    || cfg.themes.iter().any(|t| {
+                        t.name.eq_ignore_ascii_case(n) && original.as_deref().is_none_or(|o| !o.eq_ignore_ascii_case(n))
+                    })
+            };
+            if name.is_empty() {
+                Some("Give the theme a name.".to_owned())
+            } else if clash(&name) {
+                Some(format!("There's already a theme called “{name}”."))
+            } else if colors.iter().any(|c| theme::parse_color(c).is_none()) {
+                Some("Every colour needs a 6-digit hex value, like #1f2127.".to_owned())
+            } else {
+                None
+            }
+        };
+        if let Some(e) = error {
+            if let Some(s) = self.settings.borrow().as_ref() {
+                s.set_editor_error(e.into());
+            }
+            return;
+        }
+
+        let theme = theme::custom_theme(&name, &colors);
+        {
+            let mut cfg = self.cfg.borrow_mut();
+            let pos = original.as_deref().and_then(|o| cfg.themes.iter().position(|t| t.name.eq_ignore_ascii_case(o)));
+            match pos {
+                Some(i) => cfg.themes[i] = theme,
+                None => cfg.themes.push(theme),
+            }
+            cfg.selected_theme = Some(name);
+        }
+        self.close_theme_editor();
+        self.schedule_save();
+        self.apply_theme();
+        self.push_settings();
+    }
+
+    fn delete_theme(&self) {
+        let Some(Some(original)) = self.editing_theme.borrow().clone() else { return };
+        {
+            let mut cfg = self.cfg.borrow_mut();
+            cfg.themes.retain(|t| !t.name.eq_ignore_ascii_case(&original));
+            if cfg.selected_theme.as_deref().is_some_and(|s| s.eq_ignore_ascii_case(&original)) {
+                cfg.selected_theme = None;
+            }
+        }
+        self.close_theme_editor();
+        self.schedule_save();
+        self.apply_theme();
+        self.push_settings();
     }
 
     fn set_flag(&self, name: &str, v: bool) {
@@ -1287,7 +1460,7 @@ impl App {
         s.set_spacing(cfg.grid_spacing);
 
         let options = theme::options(&cfg);
-        if self.theme_options.row_count() != options.len() {
+        if self.theme_options.iter().ne(options.iter().cloned()) {
             self.theme_options.set_vec(options);
         }
         let current = theme::current_name(&cfg);

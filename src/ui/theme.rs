@@ -156,3 +156,70 @@ pub fn options(cfg: &Config) -> Vec<ThemeOption> {
         })
         .collect()
 }
+
+/// `#rrggbb` for a colour (alpha dropped).
+pub fn hex(c: Color) -> String {
+    format!("#{:02x}{:02x}{:02x}", c.red(), c.green(), c.blue())
+}
+
+/// Parse a user-typed hex colour for the editor's swatches.
+pub fn parse_color(s: &str) -> Option<Color> {
+    parse_hex(s).map(|(r, g, b)| Color::from_rgb_u8(r, g, b))
+}
+
+/// The six editable colours of a theme (background, cards, hover, accent, borders,
+/// text), as hex. Custom themes keep the values they were written with.
+pub fn editable_colors(cfg: &Config, name: &str) -> [String; 6] {
+    let c = colors_for(cfg, name);
+    let derived = [hex(c.bg), hex(c.surface), hex(c.surface_hover), hex(c.accent), hex(c.border), hex(c.text)];
+    let Some(t) = cfg.themes.iter().find(|t| t.name.eq_ignore_ascii_case(name)) else { return derived };
+    let stored = [&t.body_color, &t.header_color, &t.widget_color, &t.selection_color, &t.divider_color, &t.text_color];
+    let mut out = derived;
+    for (slot, value) in out.iter_mut().zip(stored) {
+        if let Some(rgb) = value.as_deref().and_then(parse_hex) {
+            *slot = format!("#{:02x}{:02x}{:02x}", rgb.0, rgb.1, rgb.2);
+        }
+    }
+    out
+}
+
+/// A custom theme from the editor's six colours.
+pub fn custom_theme(name: &str, colors: &[String; 6]) -> CustomTheme {
+    let norm = |s: &String| parse_hex(s).map(|(r, g, b)| format!("{r:02X}{g:02X}{b:02X}"));
+    CustomTheme {
+        name: name.trim().to_owned(),
+        body_color: norm(&colors[0]),
+        header_color: norm(&colors[1]),
+        widget_color: norm(&colors[2]),
+        selection_color: norm(&colors[3]),
+        divider_color: norm(&colors[4]),
+        text_color: norm(&colors[5]),
+        corner_radius: None,
+        grid_spacing: None,
+        grid_icon_size: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn custom_theme_round_trips_through_the_editor() {
+        let mut cfg = Config::default();
+        let colors = ["#102030", "#203040", "#304050", "#ff8800", "#405060", "#eeeeee"].map(String::from);
+        cfg.themes.push(custom_theme("Mine", &colors));
+        assert_eq!(editable_colors(&cfg, "Mine"), colors);
+        let c = colors_for(&cfg, "Mine");
+        assert_eq!(hex(c.bg), "#102030");
+        assert_eq!(hex(c.accent), "#ff8800");
+        assert!(names(&cfg).contains(&"Mine".to_string()));
+    }
+
+    #[test]
+    fn builtin_colors_are_editable_starting_points() {
+        let cfg = Config::default();
+        let [bg, ..] = editable_colors(&cfg, "Dark");
+        assert_eq!(bg, "#0d0f13");
+    }
+}
