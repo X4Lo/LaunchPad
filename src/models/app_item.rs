@@ -20,11 +20,6 @@ pub struct AppItem {
 
 impl AppItem {
     pub fn new(title: String, executable_path: PathBuf) -> Self {
-        Self {
-            id: ItemId::new(),
-            title,
-            icon_path: None,
-            executable_path,
-        }
+        Self { id: ItemId::new(), title, icon_path: None, executable_path }
     }
 }

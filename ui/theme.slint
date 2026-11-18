@@ -1,0 +1,67 @@
+// Design tokens (same system as HushKey). The palette is pushed from Rust
+// (src/ui/theme.rs) so built-in and custom themes share one code path.
+
+export struct ThemeColors {
+    dark: bool,
+    bg: color,
+    surface: color,
+    surface-hover: color,
+    surface-sunken: color,
+    border: color,
+    border-strong: color,
+    text: color,
+    text-muted: color,
+    text-faint: color,
+    accent: color,
+    accent-strong: color,
+    accent-soft: color,
+    on-accent: color,
+    danger: color,
+    danger-soft: color,
+    success: color,
+}
+
+export global Theme {
+    in-out property <ThemeColors> c: {
+        dark: true,
+        bg: #0d0f13,
+        surface: #161920,
+        surface-hover: #1c2029,
+        surface-sunken: #11141a,
+        border: #232833,
+        border-strong: #323949,
+        text: #e9ebf0,
+        text-muted: #8b92a1,
+        text-faint: #5d6473,
+        accent: #7b6bff,
+        accent-strong: #5b49f2,
+        accent-soft: #7b6bff24,
+        on-accent: #ffffff,
+        danger: #ff5a6a,
+        danger-soft: #ff5a6a26,
+        success: #34c98a,
+    };
+
+    out property <bool> dark: c.dark;
+    out property <color> bg: c.bg;
+    out property <color> surface: c.surface;
+    out property <color> surface-hover: c.surface-hover;
+    out property <color> surface-sunken: c.surface-sunken;
+    out property <color> border: c.border;
+    out property <color> border-strong: c.border-strong;
+    out property <color> text: c.text;
+    out property <color> text-muted: c.text-muted;
+    out property <color> text-faint: c.text-faint;
+    out property <color> accent: c.accent;
+    out property <color> accent-strong: c.accent-strong;
+    out property <color> accent-soft: c.accent-soft;
+    out property <color> on-accent: c.on-accent;
+    out property <color> danger: c.danger;
+    out property <color> danger-soft: c.danger-soft;
+    out property <color> success: c.success;
+    out property <color> scrim: c.dark ? #00000099 : #0d0f1366;
+
+    out property <length> radius: 14px;
+    out property <length> radius-sm: 9px;
+    out property <duration> fast: 140ms;
+}

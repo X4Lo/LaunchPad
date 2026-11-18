@@ -1,3 +1,6 @@
+//! Mutations of the item tree. Groups are one level deep: the root holds apps, folders
+//! and groups; a group holds apps and folders.
+
 use std::path::PathBuf;
 
 use crate::config::manager::Config;
@@ -6,383 +9,390 @@ use crate::models::folder_item::FolderItem;
 use crate::models::group_item::GroupItem;
 use crate::models::item::{ItemId, LaunchItem};
 
-/// Add a new application to the root level of the config.
-pub fn add_app(config: &mut Config, title: String, executable_path: PathBuf) -> ItemId {
-    let app = AppItem::new(title, executable_path);
-    let id = app.id;
-    config.items.push(LaunchItem::App(app));
-    log::info!(
-        "Added app: {} (id: {})",
-        config.items.last().unwrap().title(),
-        id
-    );
-    id
-}
+/// Where an item lives: the root (`None`) or inside a group.
+pub type Parent = Option<ItemId>;
 
-/// Add a new application to a specific group.
-pub fn add_app_to_group(
-    config: &mut Config,
-    group_id: ItemId,
-    title: String,
-    executable_path: PathBuf,
-) -> Result<ItemId, String> {
-    let group = find_group_mut(config, group_id).ok_or("Group not found")?;
-    let app = AppItem::new(title, executable_path);
-    let id = app.id;
-    group.items.push(LaunchItem::App(app));
-    Ok(id)
-}
-
-/// Create a new group at the root level.
-pub fn add_group(config: &mut Config, title: String) -> ItemId {
-    let group = GroupItem::new(title);
-    let id = group.id;
-    config.items.push(LaunchItem::Group(group));
-    log::info!(
-        "Added group: {} (id: {})",
-        config.items.last().unwrap().title(),
-        id
-    );
-    id
-}
-
-/// Add a new folder to the root level of the config.
-pub fn add_folder(config: &mut Config, title: String, folder_path: PathBuf) -> ItemId {
-    let folder = FolderItem::new(title, folder_path);
-    let id = folder.id;
-    config.items.push(LaunchItem::Folder(folder));
-    log::info!(
-        "Added folder: {} (id: {})",
-        config.items.last().unwrap().title(),
-        id
-    );
-    id
-}
-
-/// Add a new folder to a specific group.
-pub fn add_folder_to_group(
-    config: &mut Config,
-    group_id: ItemId,
-    title: String,
-    folder_path: PathBuf,
-) -> Result<ItemId, String> {
-    let group = find_group_mut(config, group_id).ok_or("Group not found")?;
-    let folder = FolderItem::new(title, folder_path);
-    let id = folder.id;
-    group.items.push(LaunchItem::Folder(folder));
-    Ok(id)
-}
-
-/// Remove an item by ID from the root level or any group.
-pub fn remove_item(config: &mut Config, id: ItemId) -> Result<(), String> {
-    // Try removing from root
-    if let Some(pos) = config.items.iter().position(|i| i.id() == id) {
-        let removed = config.items.remove(pos);
-        log::info!("Removed item from root: {} (id: {})", removed.title(), id);
-        return Ok(());
+/// The item list of `parent`, or `None` if that group doesn't exist.
+pub fn list(config: &Config, parent: Parent) -> Option<&Vec<LaunchItem>> {
+    match parent {
+        None => Some(&config.items),
+        Some(gid) => config.items.iter().find_map(|i| match i {
+            LaunchItem::Group(g) if g.id == gid => Some(&g.items),
+            _ => None,
+        }),
     }
+}
 
-    // Search in groups
-    for group in config.items.iter_mut() {
-        if let LaunchItem::Group(g) = group {
-            if let Some(pos) = g.items.iter().position(|i| i.id() == id) {
-                let removed = g.items.remove(pos);
-                log::info!(
-                    "Removed item from group '{}': {} (id: {})",
-                    g.title,
-                    removed.title(),
-                    id
-                );
-                return Ok(());
-            }
+fn list_mut(config: &mut Config, parent: Parent) -> Option<&mut Vec<LaunchItem>> {
+    match parent {
+        None => Some(&mut config.items),
+        Some(gid) => find_group_mut(config, gid).map(|g| &mut g.items),
+    }
+}
+
+/// Find an item anywhere, with the group it lives in.
+pub fn find(config: &Config, id: ItemId) -> Option<(&LaunchItem, Parent)> {
+    for item in &config.items {
+        if item.id() == id {
+            return Some((item, None));
         }
-    }
-
-    Err(format!("Item with id {} not found", id))
-}
-
-/// Rename any item (app or group) by ID.
-pub fn rename_item(config: &mut Config, id: ItemId, new_title: String) -> Result<(), String> {
-    // Search root level
-    for item in config.items.iter_mut() {
-        if let Some(renamed) = rename_if_match(item, id, &new_title) {
-            log::info!("Renamed root item: {} -> {}", renamed, new_title);
-            return Ok(());
-        }
-    }
-
-    // Search in groups
-    for item in config.items.iter_mut() {
         if let LaunchItem::Group(g) = item {
-            for sub in g.items.iter_mut() {
-                if let Some(renamed) = rename_if_match(sub, id, &new_title) {
-                    log::info!(
-                        "Renamed item in group '{}': {} -> {}",
-                        g.title,
-                        renamed,
-                        new_title
-                    );
-                    return Ok(());
-                }
+            if let Some(sub) = g.items.iter().find(|s| s.id() == id) {
+                return Some((sub, Some(g.id)));
             }
         }
     }
-
-    Err(format!("Item with id {} not found", id))
+    None
 }
 
-/// Set a custom icon path for an item.
-pub fn set_icon(config: &mut Config, id: ItemId, icon_path: PathBuf) -> Result<(), String> {
+fn find_mut(config: &mut Config, id: ItemId) -> Option<&mut LaunchItem> {
     for item in config.items.iter_mut() {
-        if set_icon_if_match(item, id, &icon_path) {
-            return Ok(());
+        if item.id() == id {
+            return Some(item);
         }
-    }
-    for item in config.items.iter_mut() {
         if let LaunchItem::Group(g) = item {
-            for sub in g.items.iter_mut() {
-                if set_icon_if_match(sub, id, &icon_path) {
-                    return Ok(());
-                }
+            if let Some(sub) = g.items.iter_mut().find(|s| s.id() == id) {
+                return Some(sub);
             }
         }
     }
-    Err(format!("Item with id {} not found", id))
+    None
 }
 
-/// Clear the custom icon for an item (revert to default).
-pub fn clear_icon(config: &mut Config, id: ItemId) -> Result<(), String> {
-    for item in config.items.iter_mut() {
-        if clear_icon_if_match(item, id) {
-            return Ok(());
-        }
-    }
-    for item in config.items.iter_mut() {
-        if let LaunchItem::Group(g) = item {
-            for sub in g.items.iter_mut() {
-                if clear_icon_if_match(sub, id) {
-                    return Ok(());
-                }
-            }
-        }
-    }
-    Err(format!("Item with id {} not found", id))
-}
-
-/// Move an app from its current location into a group.
-pub fn move_to_group(config: &mut Config, item_id: ItemId, group_id: ItemId) -> Result<(), String> {
-    // Find and remove the item
-    let item = remove_from_anywhere(config, item_id)
-        .ok_or_else(|| format!("Item with id {} not found", item_id))?;
-
-    // Ensure it's an App, not a Group or Folder
-    if matches!(&item, LaunchItem::Group(_) | LaunchItem::Folder(_)) {
-        return Err("Cannot move a group or folder into another group".into());
-    }
-
-    // Find the target group and add the item
-    let group = find_group_mut(config, group_id).ok_or("Target group not found")?;
-    group.items.push(item);
-    log::info!("Moved item {} to group {}", item_id, group_id);
-    Ok(())
-}
-
-/// Delete a group and all its contents.
-pub fn delete_group(config: &mut Config, group_id: ItemId) -> Result<(), String> {
-    if let Some(pos) = config.items.iter().position(|i| i.id() == group_id) {
-        if matches!(&config.items[pos], LaunchItem::Group(_)) {
-            let removed = config.items.remove(pos);
-            log::info!("Deleted group: {} (id: {})", removed.title(), group_id);
-            Ok(())
-        } else {
-            Err("Item is not a group".into())
-        }
-    } else {
-        Err(format!("Group with id {} not found", group_id))
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Internal helpers
-// ---------------------------------------------------------------------------
-
-fn rename_if_match(item: &mut LaunchItem, id: ItemId, new_title: &str) -> Option<String> {
-    let old = item.title().to_owned();
-    match item {
-        LaunchItem::App(app) if app.id == id => {
-            app.title = new_title.to_owned();
-            Some(old)
-        }
-        LaunchItem::Group(group) if group.id == id => {
-            group.title = new_title.to_owned();
-            Some(old)
-        }
-        LaunchItem::Folder(folder) if folder.id == id => {
-            folder.title = new_title.to_owned();
-            Some(old)
-        }
+pub fn find_group(config: &Config, group_id: ItemId) -> Option<&GroupItem> {
+    config.items.iter().find_map(|i| match i {
+        LaunchItem::Group(g) if g.id == group_id => Some(g),
         _ => None,
-    }
-}
-
-fn set_icon_if_match(item: &mut LaunchItem, id: ItemId, path: &PathBuf) -> bool {
-    match item {
-        LaunchItem::App(app) if app.id == id => {
-            app.icon_path = Some(path.clone());
-            true
-        }
-        LaunchItem::Group(group) if group.id == id => {
-            group.icon_path = Some(path.clone());
-            true
-        }
-        LaunchItem::Folder(folder) if folder.id == id => {
-            folder.icon_path = Some(path.clone());
-            true
-        }
-        _ => false,
-    }
-}
-
-fn clear_icon_if_match(item: &mut LaunchItem, id: ItemId) -> bool {
-    match item {
-        LaunchItem::App(app) if app.id == id => {
-            app.icon_path = None;
-            true
-        }
-        LaunchItem::Group(group) if group.id == id => {
-            group.icon_path = None;
-            true
-        }
-        LaunchItem::Folder(folder) if folder.id == id => {
-            folder.icon_path = None;
-            true
-        }
-        _ => false,
-    }
-}
-
-fn find_group_mut(config: &mut Config, group_id: ItemId) -> Option<&mut GroupItem> {
-    config.items.iter_mut().find_map(|item| {
-        if let LaunchItem::Group(g) = item {
-            if g.id == group_id {
-                Some(g)
-            } else {
-                None
-            }
-        } else {
-            None
-        }
     })
 }
 
-fn remove_from_anywhere(config: &mut Config, id: ItemId) -> Option<LaunchItem> {
-    if let Some(pos) = config.items.iter().position(|i| i.id() == id) {
-        return Some(config.items.remove(pos));
+fn find_group_mut(config: &mut Config, group_id: ItemId) -> Option<&mut GroupItem> {
+    config.items.iter_mut().find_map(|i| match i {
+        LaunchItem::Group(g) if g.id == group_id => Some(g),
+        _ => None,
+    })
+}
+
+/// All groups at the root, in display order.
+pub fn groups(config: &Config) -> Vec<(ItemId, String)> {
+    config
+        .items
+        .iter()
+        .filter_map(|i| match i {
+            LaunchItem::Group(g) => Some((g.id, g.title.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+// ─── Adding ──────────────────────────────────────────────
+
+fn insert(config: &mut Config, parent: Parent, item: LaunchItem) -> Result<ItemId, String> {
+    if parent.is_some() && matches!(item, LaunchItem::Group(_)) {
+        return Err("Groups can't be nested".into());
     }
-    for item in config.items.iter_mut() {
+    let id = item.id();
+    log::info!("Added {} (id: {id})", item.title());
+    list_mut(config, parent).ok_or("Group not found")?.push(item);
+    Ok(id)
+}
+
+pub fn add_app(config: &mut Config, parent: Parent, title: String, path: PathBuf) -> Result<ItemId, String> {
+    insert(config, parent, LaunchItem::App(AppItem::new(title, path)))
+}
+
+pub fn add_folder(config: &mut Config, parent: Parent, title: String, path: PathBuf) -> Result<ItemId, String> {
+    insert(config, parent, LaunchItem::Folder(FolderItem::new(title, path)))
+}
+
+pub fn add_group(config: &mut Config, title: String) -> ItemId {
+    let g = GroupItem::new(title);
+    let id = g.id;
+    config.items.push(LaunchItem::Group(g));
+    id
+}
+
+/// Add a dropped / picked path: directories become folder shortcuts, anything else an
+/// app. Returns `None` for paths that can't be launched.
+pub fn add_path(config: &mut Config, parent: Parent, path: PathBuf) -> Option<ItemId> {
+    if path.is_dir() {
+        let title =
+            path.file_name().and_then(|n| n.to_str()).map(str::to_owned).unwrap_or_else(|| path.display().to_string());
+        return add_folder(config, parent, title, path).ok();
+    }
+    if !path.is_file() {
+        return None;
+    }
+    let title = path.file_stem().and_then(|n| n.to_str()).unwrap_or("App").to_string();
+    add_app(config, parent, title, path).ok()
+}
+
+// ─── Editing ─────────────────────────────────────────────
+
+pub fn rename_item(config: &mut Config, id: ItemId, new_title: String) -> Result<(), String> {
+    let title = new_title.trim();
+    if title.is_empty() {
+        return Err("Name can't be empty".into());
+    }
+    let item = find_mut(config, id).ok_or("Item not found")?;
+    match item {
+        LaunchItem::App(a) => a.title = title.to_owned(),
+        LaunchItem::Group(g) => g.title = title.to_owned(),
+        LaunchItem::Folder(f) => f.title = title.to_owned(),
+    }
+    Ok(())
+}
+
+pub fn set_icon(config: &mut Config, id: ItemId, icon_path: Option<PathBuf>) -> Result<(), String> {
+    let item = find_mut(config, id).ok_or("Item not found")?;
+    match item {
+        LaunchItem::App(a) => a.icon_path = icon_path,
+        LaunchItem::Group(g) => g.icon_path = icon_path,
+        LaunchItem::Folder(f) => f.icon_path = icon_path,
+    }
+    Ok(())
+}
+
+pub fn icon_path(item: &LaunchItem) -> Option<&PathBuf> {
+    match item {
+        LaunchItem::App(a) => a.icon_path.as_ref(),
+        LaunchItem::Group(g) => g.icon_path.as_ref(),
+        LaunchItem::Folder(f) => f.icon_path.as_ref(),
+    }
+}
+
+// ─── Removing ────────────────────────────────────────────
+
+/// Remove an item from wherever it is (a group is removed with its contents).
+pub fn remove_item(config: &mut Config, id: ItemId) -> Result<LaunchItem, String> {
+    let (_, parent) = find(config, id).ok_or("Item not found")?;
+    let items = list_mut(config, parent).ok_or("Item not found")?;
+    let pos = items.iter().position(|i| i.id() == id).ok_or("Item not found")?;
+    let removed = items.remove(pos);
+    log::info!("Removed {} (id: {id})", removed.title());
+    Ok(removed)
+}
+
+/// Delete a group but keep its items: they move to the root where the group was.
+pub fn ungroup(config: &mut Config, group_id: ItemId) -> Result<(), String> {
+    let pos = config
+        .items
+        .iter()
+        .position(|i| matches!(i, LaunchItem::Group(g) if g.id == group_id))
+        .ok_or("Group not found")?;
+    let LaunchItem::Group(g) = config.items.remove(pos) else { unreachable!() };
+    for (k, item) in g.items.into_iter().enumerate() {
+        config.items.insert(pos + k, item);
+    }
+    Ok(())
+}
+
+// ─── Moving ──────────────────────────────────────────────
+
+/// Move an app or folder into a group (from the root or from another group). The item
+/// keeps its id and custom icon.
+pub fn move_to_group(config: &mut Config, item_id: ItemId, group_id: ItemId) -> Result<(), String> {
+    let (item, parent) = find(config, item_id).ok_or("Item not found")?;
+    if matches!(item, LaunchItem::Group(_)) {
+        return Err("Groups can't be nested".into());
+    }
+    if parent == Some(group_id) {
+        return Ok(());
+    }
+    find_group(config, group_id).ok_or("Group not found")?;
+    let item = remove_item(config, item_id)?;
+    find_group_mut(config, group_id).ok_or("Group not found")?.items.push(item);
+    log::info!("Moved {item_id} to group {group_id}");
+    Ok(())
+}
+
+/// Move an item out of its group to the root, right after the group.
+pub fn move_to_root(config: &mut Config, item_id: ItemId) -> Result<(), String> {
+    let (_, parent) = find(config, item_id).ok_or("Item not found")?;
+    let Some(gid) = parent else { return Ok(()) };
+    let item = remove_item(config, item_id)?;
+    let after = config.items.iter().position(|i| i.id() == gid).map_or(config.items.len(), |p| p + 1);
+    config.items.insert(after, item);
+    Ok(())
+}
+
+/// Reorder within `parent`: move the item at `from` so it ends up at index `to`.
+pub fn reorder(config: &mut Config, parent: Parent, from: usize, to: usize) -> Result<(), String> {
+    let items = list_mut(config, parent).ok_or("Group not found")?;
+    if from >= items.len() {
+        return Err("Index out of range".into());
+    }
+    let to = to.min(items.len() - 1);
+    if from != to {
+        let item = items.remove(from);
+        items.insert(to, item);
+    }
+    Ok(())
+}
+
+// ─── Search ──────────────────────────────────────────────
+
+/// Case-insensitive title search across the root and all groups. Groups themselves
+/// match too; results keep display order.
+pub fn search(config: &Config, query: &str) -> Vec<(LaunchItem, Parent)> {
+    let q = query.trim().to_lowercase();
+    let mut out = Vec::new();
+    for item in &config.items {
+        if item.title().to_lowercase().contains(&q) {
+            out.push((item.clone(), None));
+        }
         if let LaunchItem::Group(g) = item {
-            if let Some(pos) = g.items.iter().position(|i| i.id() == id) {
-                return Some(g.items.remove(pos));
+            for sub in &g.items {
+                if sub.title().to_lowercase().contains(&q) {
+                    out.push((sub.clone(), Some(g.id)));
+                }
             }
         }
-        // Folders don't contain sub-items, so nothing to search inside them.
     }
-    None
+    out
+}
+
+/// "New Group", "New Group 2", ... — the first name not already taken.
+pub fn unique_group_name(config: &Config, base: &str) -> String {
+    let taken: Vec<String> = groups(config).into_iter().map(|(_, n)| n).collect();
+    if !taken.iter().any(|n| n == base) {
+        return base.to_owned();
+    }
+    (2..).map(|i| format!("{base} {i}")).find(|c| !taken.contains(c)).unwrap()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
-    fn make_config() -> Config {
+    fn cfg() -> Config {
         Config::default()
     }
 
-    #[test]
-    fn test_add_and_remove_app() {
-        let mut cfg = make_config();
-        let id = add_app(&mut cfg, "Firefox".into(), PathBuf::from("C:/firefox.exe"));
-        assert_eq!(cfg.items.len(), 1);
-        assert_eq!(cfg.items[0].title(), "Firefox");
-
-        remove_item(&mut cfg, id).unwrap();
-        assert!(cfg.items.is_empty());
+    fn titles(items: &[LaunchItem]) -> Vec<&str> {
+        items.iter().map(|i| i.title()).collect()
     }
 
     #[test]
-    fn test_add_and_delete_group() {
-        let mut cfg = make_config();
-        let gid = add_group(&mut cfg, "Games".into());
-        assert_eq!(cfg.items.len(), 1);
-        assert_eq!(cfg.items[0].title(), "Games");
-
-        delete_group(&mut cfg, gid).unwrap();
-        assert!(cfg.items.is_empty());
+    fn add_and_remove_app() {
+        let mut c = cfg();
+        let id = add_app(&mut c, None, "Firefox".into(), "C:/firefox.exe".into()).unwrap();
+        assert_eq!(titles(&c.items), ["Firefox"]);
+        remove_item(&mut c, id).unwrap();
+        assert!(c.items.is_empty());
     }
 
     #[test]
-    fn test_move_app_to_group() {
-        let mut cfg = make_config();
-        let app_id = add_app(&mut cfg, "Steam".into(), PathBuf::from("C:/steam.exe"));
-        let group_id = add_group(&mut cfg, "Games".into());
+    fn move_app_and_folder_into_group_keeps_identity() {
+        let mut c = cfg();
+        let app = add_app(&mut c, None, "Steam".into(), "C:/steam.exe".into()).unwrap();
+        let folder = add_folder(&mut c, None, "Saves".into(), "C:/saves".into()).unwrap();
+        set_icon(&mut c, app, Some("custom.png".into())).unwrap();
+        let g = add_group(&mut c, "Games".into());
 
-        move_to_group(&mut cfg, app_id, group_id).unwrap();
+        move_to_group(&mut c, app, g).unwrap();
+        move_to_group(&mut c, folder, g).unwrap();
 
-        // Root should only have the group
-        assert_eq!(cfg.items.len(), 1);
-        assert!(matches!(&cfg.items[0], LaunchItem::Group(_)));
+        assert_eq!(titles(&c.items), ["Games"]);
+        let group = find_group(&c, g).unwrap();
+        assert_eq!(titles(&group.items), ["Steam", "Saves"]);
+        let (moved, parent) = find(&c, app).unwrap();
+        assert_eq!(parent, Some(g));
+        assert_eq!(icon_path(moved), Some(&PathBuf::from("custom.png")));
+    }
 
-        // App should be inside the group
-        if let LaunchItem::Group(g) = &cfg.items[0] {
-            assert_eq!(g.items.len(), 1);
-            assert_eq!(g.items[0].title(), "Steam");
-        } else {
-            panic!("Expected group");
+    #[test]
+    fn move_between_groups_and_back_to_root() {
+        let mut c = cfg();
+        let a = add_group(&mut c, "A".into());
+        let b = add_group(&mut c, "B".into());
+        let app = add_app(&mut c, Some(a), "Tool".into(), "C:/tool.exe".into()).unwrap();
+
+        move_to_group(&mut c, app, b).unwrap();
+        assert!(find_group(&c, a).unwrap().items.is_empty());
+        assert_eq!(find(&c, app).unwrap().1, Some(b));
+
+        move_to_root(&mut c, app).unwrap();
+        assert_eq!(titles(&c.items), ["A", "B", "Tool"], "lands right after its old group");
+        assert_eq!(find(&c, app).unwrap().1, None);
+    }
+
+    #[test]
+    fn groups_cannot_nest() {
+        let mut c = cfg();
+        let g1 = add_group(&mut c, "Group 1".into());
+        let g2 = add_group(&mut c, "Group 2".into());
+        assert!(move_to_group(&mut c, g1, g2).is_err());
+    }
+
+    #[test]
+    fn ungroup_keeps_items_in_place() {
+        let mut c = cfg();
+        add_app(&mut c, None, "First".into(), "C:/1.exe".into()).unwrap();
+        let g = add_group(&mut c, "G".into());
+        add_app(&mut c, None, "Last".into(), "C:/3.exe".into()).unwrap();
+        add_app(&mut c, Some(g), "X".into(), "C:/x.exe".into()).unwrap();
+        add_app(&mut c, Some(g), "Y".into(), "C:/y.exe".into()).unwrap();
+
+        ungroup(&mut c, g).unwrap();
+        assert_eq!(titles(&c.items), ["First", "X", "Y", "Last"]);
+    }
+
+    #[test]
+    fn reorder_moves_item() {
+        let mut c = cfg();
+        for t in ["A", "B", "C", "D"] {
+            add_app(&mut c, None, t.into(), format!("C:/{t}.exe").into()).unwrap();
         }
+        reorder(&mut c, None, 0, 2).unwrap();
+        assert_eq!(titles(&c.items), ["B", "C", "A", "D"]);
+        reorder(&mut c, None, 3, 0).unwrap();
+        assert_eq!(titles(&c.items), ["D", "B", "C", "A"]);
+        reorder(&mut c, None, 1, 99).unwrap();
+        assert_eq!(titles(&c.items), ["D", "C", "A", "B"]);
     }
 
     #[test]
-    fn test_rename_item() {
-        let mut cfg = make_config();
-        let id = add_app(&mut cfg, "Chrome".into(), PathBuf::from("C:/chrome.exe"));
-
-        rename_item(&mut cfg, id, "Google Chrome".into()).unwrap();
-        assert_eq!(cfg.items[0].title(), "Google Chrome");
+    fn rename_any_item() {
+        let mut c = cfg();
+        let id = add_app(&mut c, None, "Chrome".into(), "C:/chrome.exe".into()).unwrap();
+        rename_item(&mut c, id, "  Google Chrome ".into()).unwrap();
+        assert_eq!(c.items[0].title(), "Google Chrome");
+        assert!(rename_item(&mut c, id, "   ".into()).is_err());
     }
 
     #[test]
-    fn test_cannot_move_group_into_group() {
-        let mut cfg = make_config();
-        let g1 = add_group(&mut cfg, "Group 1".into());
-        let g2 = add_group(&mut cfg, "Group 2".into());
-
-        let result = move_to_group(&mut cfg, g1, g2);
-        assert!(result.is_err());
+    fn search_spans_groups() {
+        let mut c = cfg();
+        add_app(&mut c, None, "Notepad".into(), "C:/n.exe".into()).unwrap();
+        let g = add_group(&mut c, "Tools".into());
+        add_app(&mut c, Some(g), "Notepad++".into(), "C:/npp.exe".into()).unwrap();
+        let hits = search(&c, "NOTE");
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[1].1, Some(g));
     }
 
     #[test]
-    fn test_remove_nonexistent() {
-        let mut cfg = make_config();
-        let fake_id = ItemId::new();
-        assert!(remove_item(&mut cfg, fake_id).is_err());
+    fn unique_names() {
+        let mut c = cfg();
+        assert_eq!(unique_group_name(&c, "New Group"), "New Group");
+        add_group(&mut c, "New Group".into());
+        assert_eq!(unique_group_name(&c, "New Group"), "New Group 2");
     }
 
     #[test]
-    fn test_config_json_roundtrip() {
-        let mut cfg = make_config();
-        add_app(
-            &mut cfg,
-            "Notepad".into(),
-            PathBuf::from("C:/Windows/notepad.exe"),
-        );
-        add_group(&mut cfg, "Utilities".into());
+    fn remove_nonexistent() {
+        let mut c = cfg();
+        assert!(remove_item(&mut c, ItemId::new()).is_err());
+    }
 
-        let json = serde_json::to_string_pretty(&cfg).unwrap();
+    #[test]
+    fn config_json_roundtrip() {
+        let mut c = cfg();
+        add_app(&mut c, None, "Notepad".into(), "C:/Windows/notepad.exe".into()).unwrap();
+        add_group(&mut c, "Utilities".into());
+        let json = serde_json::to_string_pretty(&c).unwrap();
         let parsed: Config = serde_json::from_str(&json).unwrap();
-
-        assert_eq!(parsed.items.len(), 2);
-        assert_eq!(parsed.items[0].title(), "Notepad");
-        assert_eq!(parsed.items[1].title(), "Utilities");
+        assert_eq!(titles(&parsed.items), ["Notepad", "Utilities"]);
     }
 }

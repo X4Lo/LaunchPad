@@ -1,147 +1,34 @@
-//! Auto-start with Windows via registry.
+//! Start with Windows.
 //!
-//! ## How it works
-//!
-//! When enabled, writes a REG_SZ value to:
-//!
-//! ```text
-//! HKEY_CURRENT_USER
-//!   Software
-//!     Microsoft
-//!       Windows
-//!         CurrentVersion
-//!           Run
-//!             "Launchpad" = "C:\path\to\launchpad.exe"
-//! ```
-//!
-//! Windows runs all values under this key at user login.
-//! When disabled, the value is deleted.
-//!
-//! This is the standard per-user startup mechanism — no admin
-//! rights required, no Startup folder shortcut needed.
-//!
-//! ## Config sync
-//!
-//! On startup, the app checks whether the registry value exists
-//! and updates `auto_start` in config.json to match reality.
-//! This handles cases where the user manually removed the key.
+//! Writes the per-user `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` value
+//! "Launchpad" (no admin rights needed) via the `auto-launch` crate. The entry passes
+//! `--minimized`, so a login start goes straight to the tray.
 
-#[cfg(windows)]
-fn subkey_wide() -> Vec<u16> {
-    "Software\\Microsoft\\Windows\\CurrentVersion\\Run"
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect()
+pub const MINIMIZED_ARG: &str = "--minimized";
+
+fn auto_launch() -> Result<auto_launch::AutoLaunch, String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    // auto-launch writes `<path> <args>` verbatim, so quote the path for folders with spaces.
+    let quoted = format!("\"{}\"", exe.to_string_lossy());
+    let mut b = auto_launch::AutoLaunchBuilder::new();
+    b.set_app_name("Launchpad").set_app_path(&quoted).set_args(&[MINIMIZED_ARG]);
+    b.build().map_err(|e| e.to_string())
 }
 
-#[cfg(windows)]
-fn value_name_wide() -> Vec<u16> {
-    "Launchpad"
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect()
+pub fn is_enabled() -> bool {
+    auto_launch().and_then(|a| a.is_enabled().map_err(|e| e.to_string())).unwrap_or(false)
 }
 
-/// Check whether the Launchpad auto-start registry value exists.
-#[cfg(windows)]
-pub fn is_auto_start_enabled() -> bool {
-    use windows::core::PCWSTR;
-    use windows::Win32::System::Registry::{
-        RegOpenKeyExW, RegQueryValueExW, HKEY_CURRENT_USER, KEY_READ,
-    };
-
-    let subkey = subkey_wide();
-    let value_name = value_name_wide();
-
-    unsafe {
-        let mut hkey = std::mem::zeroed();
-        if RegOpenKeyExW(
-            HKEY_CURRENT_USER,
-            PCWSTR::from_raw(subkey.as_ptr()),
-            0,
-            KEY_READ,
-            &mut hkey,
-        )
-        .is_err()
-        {
-            return false;
-        }
-        let result = RegQueryValueExW(
-            hkey,
-            PCWSTR::from_raw(value_name.as_ptr()),
-            None,
-            None,
-            None,
-            None,
-        );
-        result.is_ok()
+/// Enable (pointing at the running exe) or disable. Only called when the user flips the
+/// switch: re-registering on every start would let a second copy (a USB build, a dev
+/// build) silently take over the entry.
+pub fn set_enabled(enabled: bool) -> Result<(), String> {
+    let al = auto_launch()?;
+    if enabled {
+        al.enable().map_err(|e| e.to_string())
+    } else if al.is_enabled().unwrap_or(false) {
+        al.disable().map_err(|e| e.to_string())
+    } else {
+        Ok(())
     }
-}
-
-#[cfg(not(windows))]
-pub fn is_auto_start_enabled() -> bool {
-    false
-}
-
-/// Enable or disable auto-start with Windows via registry.
-#[cfg(windows)]
-pub fn set_auto_start(enable: bool) -> bool {
-    use windows::core::PCWSTR;
-    use windows::Win32::System::Registry::{
-        RegCreateKeyW, RegDeleteValueW, RegSetValueExW, HKEY_CURRENT_USER, REG_SZ,
-    };
-
-    let exe_path = match std::env::current_exe() {
-        Ok(p) => p,
-        Err(_) => return false,
-    };
-    let exe_str = exe_path.to_string_lossy();
-    let wide_exe: Vec<u16> = exe_str.encode_utf16().chain(std::iter::once(0)).collect();
-
-    let subkey = subkey_wide();
-    let value_name = value_name_wide();
-
-    unsafe {
-        let mut hkey = std::mem::zeroed();
-        if RegCreateKeyW(
-            HKEY_CURRENT_USER,
-            PCWSTR::from_raw(subkey.as_ptr()),
-            &mut hkey,
-        )
-        .is_err()
-        {
-            log::error!("Failed to open registry key for auto-start");
-            return false;
-        }
-
-        if enable {
-            let data: &[u8] = std::slice::from_raw_parts(
-                wide_exe.as_ptr() as *const u8,
-                (wide_exe.len() - 1) * 2,
-            );
-            if RegSetValueExW(
-                hkey,
-                PCWSTR::from_raw(value_name.as_ptr()),
-                0,
-                REG_SZ,
-                Some(data),
-            )
-            .is_err()
-            {
-                log::error!("Failed to write auto-start registry value");
-                return false;
-            }
-            log::info!("Auto-start enabled");
-        } else {
-            let _ = RegDeleteValueW(hkey, PCWSTR::from_raw(value_name.as_ptr()));
-            log::info!("Auto-start disabled");
-        }
-        true
-    }
-}
-
-#[cfg(not(windows))]
-pub fn set_auto_start(_enable: bool) -> bool {
-    log::warn!("Auto-start is only supported on Windows");
-    false
 }

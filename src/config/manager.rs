@@ -1,105 +1,68 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 use crate::models::item::LaunchItem;
 
-// ─── Theme ───────────────────────────────────────────────
+// ─── Custom theme ────────────────────────────────────────
 
+/// A user-defined colour theme from `config.json`.
+///
+/// Built-in themes (Dark, Light, Dracula, Nord, Catppuccin) live in code
+/// (`ui::theme`); this struct only describes *custom* ones. Every field is optional
+/// and falls back to the Dark theme.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Theme {
     pub name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub header_color: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body_color: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub widget_color: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selection_color: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub divider_color: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text_color: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Legacy fields from the egui UI. Kept so old configs round-trip; no longer used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub corner_radius: Option<u8>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grid_spacing: Option<f32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grid_icon_size: Option<f32>,
 }
 
-impl Theme {
-    pub fn default_theme() -> Self {
-        Self {
-            name: "Default".into(),
-            header_color: Some("313337".into()),
-            body_color: Some("1F2127".into()),
-            widget_color: Some("3A3C42".into()),
-            selection_color: Some("606268".into()),
-            divider_color: Some("3D3F43".into()),
-            text_color: None,
-            corner_radius: Some(12),
-            grid_spacing: Some(12.0),
-            grid_icon_size: Some(48.0),
-        }
+/// Parse a hex colour like `"313337"` or `"#FF00AA"`.
+pub fn parse_hex(s: &str) -> Option<(u8, u8, u8)> {
+    let s = s.trim().trim_start_matches('#');
+    if s.len() != 6 || !s.is_ascii() {
+        return None;
     }
-
-    /// Built-in themes shipped with the app.
-    pub fn builtin_themes() -> Vec<Theme> {
-        vec![
-            Self::default_theme(),
-            Theme {
-                name: "Dracula".into(),
-                header_color: Some("282A36".into()),
-                body_color: Some("21222C".into()),
-                widget_color: Some("44475A".into()),
-                selection_color: Some("6272A4".into()),
-                divider_color: Some("44475A".into()),
-                text_color: Some("F8F8F2".into()),
-                corner_radius: Some(10),
-                grid_spacing: Some(12.0),
-                grid_icon_size: Some(48.0),
-            },
-            Theme {
-                name: "Nord".into(),
-                header_color: Some("2E3440".into()),
-                body_color: Some("242933".into()),
-                widget_color: Some("3B4252".into()),
-                selection_color: Some("5E81AC".into()),
-                divider_color: Some("3B4252".into()),
-                text_color: Some("D8DEE9".into()),
-                corner_radius: Some(8),
-                grid_spacing: Some(10.0),
-                grid_icon_size: Some(48.0),
-            },
-            Theme {
-                name: "Catppuccin".into(),
-                header_color: Some("1E1E2E".into()),
-                body_color: Some("181825".into()),
-                widget_color: Some("313244".into()),
-                selection_color: Some("CBA6F7".into()),
-                divider_color: Some("313244".into()),
-                text_color: Some("CDD6F4".into()),
-                corner_radius: Some(14),
-                grid_spacing: Some(14.0),
-                grid_icon_size: Some(52.0),
-            },
-        ]
-    }
-
-    /// Parse a hex string like "313337" or "FF00AA" into Color32.
-    pub fn parse_hex(s: &str) -> Option<egui::Color32> {
-        let s = s.trim_start_matches('#');
-        if s.len() != 6 {
-            return None;
-        }
-        let r = u8::from_str_radix(&s[0..2], 16).ok()?;
-        let g = u8::from_str_radix(&s[2..4], 16).ok()?;
-        let b = u8::from_str_radix(&s[4..6], 16).ok()?;
-        Some(egui::Color32::from_rgb(r, g, b))
-    }
+    let r = u8::from_str_radix(&s[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&s[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&s[4..6], 16).ok()?;
+    Some((r, g, b))
 }
+
+/// Expand `$(Drive)` (the portable-launcher convention for "the drive this app runs
+/// from", e.g. `C:`) in a stored path. Other paths are returned unchanged.
+pub fn expand_path(path: &Path) -> PathBuf {
+    const VAR: &str = "$(drive)";
+    let s = path.to_string_lossy();
+    let Some(at) = s.to_ascii_lowercase().find(VAR) else { return path.to_path_buf() };
+    let drive = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.to_str().and_then(|s| s.get(..2)).filter(|d| d.ends_with(':')).map(str::to_owned))
+        .unwrap_or_else(|| "C:".into());
+    PathBuf::from(format!("{}{drive}{}", &s[..at], &s[at + VAR.len()..]))
+}
+
+/// Names the egui version wrote into `config.json` as copies of its built-ins.
+/// They are dropped on load: the built-ins now live in code.
+const LEGACY_BUILTIN_THEMES: [&str; 4] = ["Default", "Dracula", "Nord", "Catppuccin"];
 
 // ─── Config ──────────────────────────────────────────────
 
@@ -108,6 +71,7 @@ pub struct Config {
     #[serde(default)]
     pub items: Vec<LaunchItem>,
 
+    /// Window geometry in logical pixels.
     #[serde(default)]
     pub window_width: Option<f32>,
     #[serde(default)]
@@ -121,16 +85,19 @@ pub struct Config {
     pub grid_spacing: f32,
     #[serde(default = "default_icon_size")]
     pub grid_icon_size: f32,
+    /// Grow or shrink icons so every item fits the window.
+    #[serde(default)]
+    pub auto_fit: bool,
 
-    /// Whether to hide the launcher after launching an app.
+    /// Hide the launcher after launching an app or opening a folder.
     #[serde(default)]
     pub hide_on_launch: bool,
 
-    /// Available themes.
-    #[serde(default = "Theme::builtin_themes")]
+    /// Custom themes (built-ins are always available).
+    #[serde(default)]
     pub themes: Vec<Theme>,
 
-    /// Name of the currently selected theme (None = use defaults).
+    /// Name of the active theme. `None` = Dark.
     #[serde(default)]
     pub selected_theme: Option<String>,
 
@@ -142,20 +109,24 @@ pub struct Config {
     #[serde(default = "default_true")]
     pub hotkey_on_release: bool,
 
-    /// Launchpad should start automatically with Windows.
+    /// Launchpad starts automatically (in the tray) when you sign in.
     #[serde(default)]
     pub auto_start: bool,
 
-    /// When enabled, clicking the X close button hides to tray instead of quitting.
+    /// Closing the window hides it to the tray instead of quitting.
     #[serde(default)]
     pub close_to_tray: bool,
+
+    /// Keep the launcher above other windows.
+    #[serde(default)]
+    pub always_on_top: bool,
 }
 
 fn default_spacing() -> f32 {
     12.0
 }
 fn default_icon_size() -> f32 {
-    48.0
+    56.0
 }
 fn default_hotkey() -> String {
     "Ctrl+Alt+R".into()
@@ -174,42 +145,34 @@ impl Default for Config {
             window_y: None,
             grid_spacing: default_spacing(),
             grid_icon_size: default_icon_size(),
+            auto_fit: false,
             hide_on_launch: false,
-            themes: Theme::builtin_themes(),
+            themes: Vec::new(),
             selected_theme: None,
             hotkey: default_hotkey(),
             hotkey_on_release: true,
             auto_start: false,
             close_to_tray: false,
+            always_on_top: false,
         }
     }
 }
 
 impl Config {
-    /// Get the effective theme: the selected theme merged over the default.
-    pub fn resolve_theme(&self) -> Theme {
-        let default = Theme::default_theme();
-        if let Some(ref name) = self.selected_theme {
-            if let Some(t) = self
-                .themes
-                .iter()
-                .find(|t| t.name.eq_ignore_ascii_case(name))
-            {
-                return Theme {
-                    name: t.name.clone(),
-                    header_color: t.header_color.clone().or(default.header_color),
-                    body_color: t.body_color.clone().or(default.body_color),
-                    widget_color: t.widget_color.clone().or(default.widget_color),
-                    selection_color: t.selection_color.clone().or(default.selection_color),
-                    divider_color: t.divider_color.clone().or(default.divider_color),
-                    text_color: t.text_color.clone().or(default.text_color),
-                    corner_radius: t.corner_radius.or(default.corner_radius),
-                    grid_spacing: t.grid_spacing.or(default.grid_spacing),
-                    grid_icon_size: t.grid_icon_size.or(default.grid_icon_size),
-                };
-            }
+    /// Clamp values a hand-edited or older config may have out of range.
+    fn sanitize(&mut self) {
+        self.themes.retain(|t| !LEGACY_BUILTIN_THEMES.iter().any(|b| t.name.eq_ignore_ascii_case(b)));
+        if self.selected_theme.as_deref().is_some_and(|n| n.eq_ignore_ascii_case("Default")) {
+            self.selected_theme = None;
         }
-        default
+        if !self.grid_icon_size.is_finite() {
+            self.grid_icon_size = default_icon_size();
+        }
+        if !self.grid_spacing.is_finite() {
+            self.grid_spacing = default_spacing();
+        }
+        self.grid_icon_size = self.grid_icon_size.clamp(32.0, 128.0);
+        self.grid_spacing = self.grid_spacing.clamp(0.0, 40.0);
     }
 }
 
@@ -222,147 +185,153 @@ pub struct ConfigManager {
 }
 
 impl ConfigManager {
-    /// Get the Launchpad data directory.
-    pub fn data_dir() -> PathBuf {
-        dirs::config_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("Launchpad")
+    fn appdata_dir() -> Option<PathBuf> {
+        dirs::config_dir().map(|d| d.join("Launchpad"))
+    }
+
+    fn exe_dir() -> Option<PathBuf> {
+        std::env::current_exe().ok()?.parent().map(Path::to_path_buf)
     }
 
     /// Get the path to a portable config next to the exe, if it exists.
     fn portable_config_path() -> Option<PathBuf> {
-        let exe_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
-        let candidate = exe_dir.join("config.json");
-        if candidate.exists() {
+        let candidate = Self::exe_dir()?.join("config.json");
+        candidate.exists().then(|| {
             log::info!("Using portable config: {}", candidate.display());
-            Some(candidate)
-        } else {
-            None
-        }
-    }
-
-    /// Resolve the config path.
-    ///
-    /// Runs **before** the egui window exists (called from `main()` before
-    /// `eframe::run_native`). When no config file is found it sets
-    /// `pending_first_run = true` instead of prompting — the app will show
-    /// an in-window setup dialog once the UI is ready.
-    pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
-        // 1. Existing portable config — use it.
-        if let Some(portable) = Self::portable_config_path() {
-            return Ok(Self {
-                config_path: portable,
-                pending_first_run: false,
-            });
-        }
-
-        let appdata_dir = dirs::config_dir()
-            .ok_or("Could not determine config directory")?
-            .join("Launchpad");
-        let appdata_path = appdata_dir.join("config.json");
-
-        // 2. Existing AppData config — use it.
-        if appdata_path.exists() {
-            std::fs::create_dir_all(&appdata_dir)?;
-            return Ok(Self {
-                config_path: appdata_path,
-                pending_first_run: false,
-            });
-        }
-
-        // 3. First run — defer to in-app dialog.
-        log::info!("First run detected — deferring setup to in-app dialog");
-        Ok(Self {
-            config_path: appdata_path, // tentative; may be overwritten
-            pending_first_run: true,
+            candidate
         })
     }
 
-    /// Called from the UI once the user chooses portable or normal mode.
-    /// Creates the directory/file and updates `self.config_path`.
-    /// Returns `Err` if the chosen portable dir isn't writable (caller
-    /// should fall back to `use_portable: false`).
-    pub fn finalize_first_run(
-        &mut self,
-        use_portable: bool,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    /// Resolve the config path. When no config file exists, `pending_first_run` is set
+    /// and the app asks the user where to store it before anything is written.
+    pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
+        if let Some(portable) = Self::portable_config_path() {
+            return Ok(Self { config_path: portable, pending_first_run: false });
+        }
+        let appdata_dir = Self::appdata_dir().ok_or("Could not determine config directory")?;
+        let appdata_path = appdata_dir.join("config.json");
+        if appdata_path.exists() {
+            return Ok(Self { config_path: appdata_path, pending_first_run: false });
+        }
+        log::info!("First run detected — deferring setup to in-app dialog");
+        Ok(Self { config_path: appdata_path, pending_first_run: true })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.config_path
+    }
+
+    /// Called once the user chooses portable or normal mode. Falls back to AppData if
+    /// the exe's folder isn't writable. Returns whether portable mode is in effect.
+    pub fn finalize_first_run(&mut self, use_portable: bool, config: &Config) -> Result<bool, String> {
         if use_portable {
-            if let Some(exe_dir) = std::env::current_exe()
-                .ok()
-                .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-            {
-                let portable_path = exe_dir.join("config.json");
-                let default_config = Config::default();
-                let json = serde_json::to_string_pretty(&default_config).unwrap_or_default();
-                if std::fs::write(&portable_path, &json).is_ok() {
-                    log::info!("Portable config created at: {}", portable_path.display());
-                    self.config_path = portable_path;
+            if let Some(dir) = Self::exe_dir() {
+                let path = dir.join("config.json");
+                let json = serde_json::to_string_pretty(config).map_err(|e| e.to_string())?;
+                if std::fs::write(&path, json).is_ok() {
+                    log::info!("Portable config created at: {}", path.display());
+                    self.config_path = path;
                     self.pending_first_run = false;
-                    return Ok(());
+                    return Ok(true);
                 }
             }
             log::warn!("Portable config creation failed, falling back to AppData");
         }
-
-        // Normal mode (or fallback from failed portable).
-        let appdata_dir = dirs::config_dir()
-            .ok_or("Could not determine config directory")?
-            .join("Launchpad");
-        std::fs::create_dir_all(&appdata_dir)?;
-        self.config_path = appdata_dir.join("config.json");
+        let dir = Self::appdata_dir().ok_or("Could not determine config directory")?;
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        self.config_path = dir.join("config.json");
         self.pending_first_run = false;
-        Ok(())
+        self.save(config).map_err(|e| e.to_string())?;
+        Ok(false)
     }
 
-    /// Returns the icons directory (next to the config file).
+    /// The icons directory (next to the config file).
     pub fn icons_dir(&self) -> PathBuf {
-        self.config_path
-            .parent()
-            .map(|p| p.join("icons"))
-            .unwrap_or_else(|| PathBuf::from("icons"))
+        self.config_path.parent().map(|p| p.join("icons")).unwrap_or_else(|| PathBuf::from("icons"))
+    }
+
+    /// Resolve a stored icon path: bare filenames live in the icons directory.
+    pub fn resolve_icon(&self, path: &Path) -> PathBuf {
+        if path.parent().is_none_or(|p| p.as_os_str().is_empty()) {
+            self.icons_dir().join(path)
+        } else {
+            expand_path(path)
+        }
     }
 
     /// Load config from disk. If pending first run, returns defaults without saving.
-    pub fn load(&self) -> Result<Config, Box<dyn std::error::Error>> {
+    pub fn load(&self) -> Config {
         if self.pending_first_run || !self.config_path.exists() {
-            return Ok(Config::default());
+            return Config::default();
         }
-        let contents = std::fs::read_to_string(&self.config_path)?;
-        let mut config: Config = serde_json::from_str(&contents).unwrap_or_else(|e| {
-            log::warn!("Failed to parse config, using default: {}", e);
-            Config::default()
-        });
-        // Merge built-in themes: add any that don't exist yet in the user's config
-        for builtin in Theme::builtin_themes() {
-            if !config
-                .themes
-                .iter()
-                .any(|t| t.name.eq_ignore_ascii_case(&builtin.name))
-            {
-                config.themes.push(builtin);
+        let mut config: Config = match std::fs::read_to_string(&self.config_path) {
+            Ok(s) => serde_json::from_str(&s).unwrap_or_else(|e| {
+                log::warn!("Failed to parse config, using defaults: {e}");
+                Config::default()
+            }),
+            Err(e) => {
+                log::warn!("Failed to read config, using defaults: {e}");
+                Config::default()
             }
-        }
+        };
+        config.sanitize();
 
-        // Sync auto-start config with actual registry state
-        let actual = crate::platform::autostart::is_auto_start_enabled();
+        // Sync auto-start with the real registry state (the user may have removed it).
+        let actual = crate::platform::autostart::is_enabled();
         if config.auto_start != actual {
-            log::info!(
-                "Auto-start mismatch: config={}, registry={}. Syncing.",
-                config.auto_start,
-                actual
-            );
+            log::info!("Auto-start mismatch: config={}, system={actual}. Syncing.", config.auto_start);
             config.auto_start = actual;
-            self.save(&config)?;
         }
-
-        Ok(config)
+        config
     }
 
     pub fn save(&self, config: &Config) -> Result<(), Box<dyn std::error::Error>> {
+        if self.pending_first_run {
+            return Ok(());
+        }
         let json = serde_json::to_string_pretty(config)?;
         let tmp_path = self.config_path.with_extension("tmp");
         std::fs::write(&tmp_path, &json)?;
         std::fs::rename(&tmp_path, &self.config_path)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hex_parsing() {
+        assert_eq!(parse_hex("313337"), Some((0x31, 0x33, 0x37)));
+        assert_eq!(parse_hex("#ff00AA"), Some((0xff, 0x00, 0xaa)));
+        assert_eq!(parse_hex("12345"), None);
+        assert_eq!(parse_hex("zzzzzz"), None);
+    }
+
+    #[test]
+    fn drive_variable_expands_to_a_drive() {
+        let p = expand_path(Path::new(r"$(Drive)\Program Files\App\app.exe"));
+        let s = p.to_string_lossy();
+        assert!(!s.contains("$("), "{s}");
+        assert!(s.ends_with(r":\Program Files\App\app.exe"), "{s}");
+        assert_eq!(expand_path(Path::new(r"D:\x.exe")), PathBuf::from(r"D:\x.exe"));
+    }
+
+    #[test]
+    fn legacy_config_loads_and_drops_builtin_copies() {
+        let json = r#"{
+            "items": [],
+            "themes": [{"name": "Default", "body_color": "1F2127"}, {"name": "Mine", "body_color": "101010"}],
+            "selected_theme": "Default",
+            "grid_icon_size": 500
+        }"#;
+        let mut cfg: Config = serde_json::from_str(json).unwrap();
+        cfg.sanitize();
+        assert_eq!(cfg.themes.len(), 1);
+        assert_eq!(cfg.themes[0].name, "Mine");
+        assert_eq!(cfg.selected_theme, None);
+        assert_eq!(cfg.grid_icon_size, 128.0);
+        assert!(cfg.hotkey_on_release, "missing field uses its default");
     }
 }

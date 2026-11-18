@@ -1,4 +1,32 @@
-# Changelog — Recent Major Update
+# Changelog
+
+## 0.2.0 — UI rework (Slint)
+
+The egui interface was replaced with a Slint UI built on the same design system as HushKey.
+
+### Interface
+- Native Windows window (real title bar, resizing, snapping, dark/light title bar) instead of the frameless egui window with hand-drawn resize strips.
+- Settings open in their **own window** (General / Appearance / About) instead of a panel over the launcher.
+- New header, search field and icon grid; proper icons for every toolbar and menu action.
+- Item menu (right-click, Shift+F10 or the Menu key): Open, Show in Explorer, Rename, Change / Reset icon, Move to group, Move out of group, Ungroup, Remove.
+- **+** menu: Add app…, Add folder…, New group…
+- Drag tiles to reorder; drop a tile onto a group to move it in.
+- Groups show a preview of their first four items. Missing targets get a red **!** badge.
+- Removing an item shows an **Undo** banner. Deleting a non-empty group asks first and offers **Ungroup** instead.
+- Themes: Dark, Light, Dracula, Nord, Catppuccin, plus custom themes from config.json.
+- Mouse Back / Forward buttons leave a group / go back into it.
+
+### Fixes
+- **Icons:** extraction rewritten on top of the Windows shell. Fixes invisible legacy icons (no alpha), blurry 32 px upscales, shortcuts (`.lnk`), icons that weren't cached yet (`E_PENDING`), custom icons that are `.exe` files, and `$(Drive)` paths. Loading runs on background threads, so the window opens instantly.
+- **Add to group:** works for folders too, from inside other groups and from search results. Moving keeps the item's id and custom icon. Long group lists scroll inside the dialog.
+- **Hotkey:** changes apply immediately (no restart). Recorded by pressing the keys rather than typed by hand.
+- Hide/show uses real hide instead of minimize. A second launch brings up the running window.
+- The icon size slider works with every theme (themes no longer override it).
+- Start with Windows quotes the exe path and starts in the tray (`--minimized`). The entry is only rewritten when you toggle the setting.
+
+---
+
+## Earlier
 
 ## New Features
 

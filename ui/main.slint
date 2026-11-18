@@ -1,0 +1,1027 @@
+import { ScrollView, Palette } from "std-widgets.slint";
+import { Theme, ThemeColors } from "theme.slint";
+import {
+    SearchGlyph, PlusGlyph, GearGlyph, BackGlyph, CloseGlyph, FolderGlyph, AppGlyph, GroupGlyph, OpenGlyph,
+    PencilGlyph, ImageGlyph, ResetGlyph, MoveInGlyph, MoveOutGlyph, TrashGlyph, CheckGlyph,
+    IconButton, Button, TextField, MenuEntry, MenuSeparator, MenuPanel
+} from "widgets.slint";
+
+export { Theme, ThemeColors }
+export { SettingsWindow, ThemeOption } from "settings.slint";
+
+export struct Tile {
+    id: string,
+    kind: int,           // 0 = app, 1 = group, 2 = folder
+    title: string,
+    location: string,    // search results: the group the item lives in
+    in-group: bool,
+    icon: image,
+    has-icon: bool,
+    custom-icon: bool,
+    initial: string,
+    tint: color,
+    previews: [image],   // groups: up to four member icons
+    count: int,          // groups: number of members
+    missing: bool,       // the file or folder no longer exists
+}
+
+export struct GroupChoice {
+    id: string,
+    title: string,
+    count: int,
+    current: bool,
+}
+
+// ── Tiles ─────────────────────────────────────────────────────────────────────
+
+component LetterIcon inherits Rectangle {
+    in property <string> letter;
+    in property <color> tint;
+    in property <length> size;
+    width: size;
+    height: size;
+    border-radius: size * 0.24;
+    background: @linear-gradient(160deg, tint.brighter(18%) 0%, tint 100%);
+    Text {
+        text: root.letter;
+        color: white;
+        font-size: root.size * 0.42;
+        font-weight: 700;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+component TileIcon inherits Rectangle {
+    in property <Tile> tile;
+    in property <length> size;
+    width: size;
+    height: size;
+
+    if root.tile.kind == 1 && !root.tile.has-icon: Rectangle {
+        property <length> pad: root.size * 0.15;
+        property <length> gap: root.size * 0.07;
+        property <length> cell: (root.size - 2 * self.pad - self.gap) / 2;
+        border-radius: root.size * 0.24;
+        background: Theme.surface-sunken;
+        border-width: 1px;
+        border-color: Theme.border-strong;
+        for img[k] in root.tile.previews: Image {
+            x: parent.pad + mod(k, 2) * (parent.cell + parent.gap);
+            y: parent.pad + floor(k / 2) * (parent.cell + parent.gap);
+            width: parent.cell;
+            height: parent.cell;
+            source: img;
+            image-fit: contain;
+        }
+        if root.tile.previews.length == 0: GroupGlyph {
+            width: root.size * 0.46;
+            height: root.size * 0.46;
+            stroke: Theme.text-faint;
+        }
+    }
+    if root.tile.has-icon: Image {
+        width: root.size;
+        height: root.size;
+        source: root.tile.icon;
+        image-fit: contain;
+        opacity: root.tile.missing ? 0.4 : 1;
+    }
+    if !root.tile.has-icon && root.tile.kind != 1: LetterIcon {
+        letter: root.tile.initial;
+        tint: root.tile.tint;
+        size: root.size;
+        opacity: root.tile.missing ? 0.4 : 1;
+    }
+    if root.tile.missing: Rectangle {
+        width: max(18px, root.size * 0.34);
+        height: self.width;
+        x: root.size - self.width + 3px;
+        y: root.size - self.height + 3px;
+        border-radius: self.width / 2;
+        background: Theme.danger;
+        border-width: 2px;
+        border-color: Theme.bg;
+        Text {
+            text: "!";
+            color: white;
+            font-size: parent.width * 0.62;
+            font-weight: 800;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+}
+
+component TileView inherits Rectangle {
+    in property <Tile> tile;
+    in property <length> icon-size;
+    in property <bool> selected;
+    in property <bool> drop-target;
+    in property <bool> lifted;          // this tile is being dragged
+    in property <bool> can-drag;
+    in property <bool> show-location;
+    callback activate();
+    callback pressed-tile();
+    callback context(length, length);
+    callback drag-move(length, length);
+    callback drag-end();
+
+    property <bool> dragged;
+    property <length> press-x;
+    property <length> press-y;
+
+    border-radius: 14px;
+    background: root.drop-target ? Theme.accent-soft
+        : root.lifted ? Theme.surface
+        : root.selected ? Theme.accent-soft
+        : touch.has-hover ? Theme.surface-hover : transparent;
+    border-width: root.drop-target || root.selected ? 1.5px : 0;
+    border-color: Theme.accent;
+    drop-shadow-blur: root.lifted ? 18px : 0;
+    drop-shadow-offset-y: root.lifted ? 6px : 0;
+    drop-shadow-color: #00000059;
+    opacity: root.lifted ? 0.92 : 1;
+    animate background { duration: Theme.fast; }
+
+    accessible-role: button;
+    accessible-label: root.tile.title + (root.tile.kind == 1 ? ", group of " + root.tile.count : root.tile.kind == 2 ? ", folder" : "");
+    accessible-action-default => { root.activate(); }
+
+    VerticalLayout {
+        padding-top: 10px;
+        padding-bottom: 6px;
+        padding-left: 6px;
+        padding-right: 6px;
+        spacing: 7px;
+        alignment: start;
+        HorizontalLayout {
+            alignment: center;
+            TileIcon {
+                tile: root.tile;
+                size: root.icon-size;
+            }
+        }
+        Text {
+            text: root.tile.title;
+            font-size: 12px;
+            font-weight: 500;
+            color: root.tile.missing ? Theme.text-muted : Theme.text;
+            horizontal-alignment: center;
+            overflow: elide;
+        }
+        if root.show-location && root.tile.location != "": Text {
+            text: "in " + root.tile.location;
+            font-size: 10.5px;
+            color: Theme.text-faint;
+            horizontal-alignment: center;
+            overflow: elide;
+        }
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        pointer-event(e) => {
+            if (e.button == PointerEventButton.left && e.kind == PointerEventKind.down) {
+                root.dragged = false;
+                root.press-x = self.mouse-x;
+                root.press-y = self.mouse-y;
+                root.pressed-tile();
+            } else if (e.button == PointerEventButton.left && e.kind == PointerEventKind.up) {
+                if (root.dragged) {
+                    root.drag-end();
+                }
+            } else if (e.button == PointerEventButton.right && e.kind == PointerEventKind.up) {
+                root.context(self.mouse-x, self.mouse-y);
+            }
+        }
+        moved => {
+            if (self.pressed && root.can-drag) {
+                if (!root.dragged && (abs(self.mouse-x - root.press-x) > 6px || abs(self.mouse-y - root.press-y) > 6px)) {
+                    root.dragged = true;
+                }
+                if (root.dragged) {
+                    root.drag-move(self.mouse-x - root.press-x, self.mouse-y - root.press-y);
+                }
+            }
+        }
+        clicked => {
+            if (!root.dragged) {
+                root.activate();
+            }
+        }
+    }
+}
+
+// ── Dialog pieces ─────────────────────────────────────────────────────────────
+
+component GroupChoiceRow inherits Rectangle {
+    in property <GroupChoice> choice;
+    callback picked();
+    height: 40px;
+    border-radius: 9px;
+    background: root.choice.current ? Theme.surface-sunken : (touch.has-hover ? Theme.surface-hover : transparent);
+    opacity: root.choice.current ? 0.6 : 1;
+    accessible-role: button;
+    accessible-label: "Move to " + root.choice.title;
+    accessible-action-default => { if (!root.choice.current) { root.picked(); } }
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 12px;
+        spacing: 10px;
+        VerticalLayout {
+            alignment: center;
+            GroupGlyph { stroke: Theme.accent; }
+        }
+        Text {
+            text: root.choice.title;
+            font-size: 13px;
+            font-weight: 600;
+            color: Theme.text;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            overflow: elide;
+        }
+        Text {
+            text: root.choice.current ? "Current" : (root.choice.count == 1 ? "1 item" : root.choice.count + " items");
+            font-size: 11.5px;
+            color: Theme.text-faint;
+            vertical-alignment: center;
+        }
+    }
+    touch := TouchArea {
+        enabled: !root.choice.current;
+        mouse-cursor: pointer;
+        clicked => { root.picked(); }
+    }
+}
+
+component StorageOption inherits Rectangle {
+    in property <string> title;
+    in property <string> detail;
+    in property <bool> recommended;
+    callback picked();
+    border-radius: 12px;
+    border-width: 1px;
+    border-color: touch.has-hover ? Theme.accent : Theme.border-strong;
+    background: touch.has-hover ? Theme.accent-soft : Theme.surface-sunken;
+    animate background, border-color { duration: Theme.fast; }
+    accessible-role: button;
+    accessible-label: root.title;
+    accessible-action-default => { root.picked(); }
+    VerticalLayout {
+        padding: 14px;
+        spacing: 4px;
+        HorizontalLayout {
+            spacing: 8px;
+            Text { text: root.title; font-size: 13.5px; font-weight: 700; color: Theme.text; vertical-alignment: center; }
+            if root.recommended: Rectangle {
+                border-radius: 6px;
+                background: Theme.accent-soft;
+                HorizontalLayout {
+                    padding-left: 7px;
+                    padding-right: 7px;
+                    padding-top: 2px;
+                    padding-bottom: 2px;
+                    Text { text: "Recommended"; font-size: 10.5px; font-weight: 700; color: Theme.accent; }
+                }
+            }
+            Rectangle { horizontal-stretch: 1; }
+        }
+        Text { text: root.detail; font-size: 12px; color: Theme.text-muted; wrap: word-wrap; }
+    }
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.picked(); }
+    }
+}
+
+// ── Main window ───────────────────────────────────────────────────────────────
+
+export component MainWindow inherits Window {
+    title: "Launchpad";
+    icon: root.app-icon;
+    preferred-width: 720px;
+    preferred-height: 520px;
+    min-width: 360px;
+    min-height: 320px;
+    background: Theme.bg;
+    default-font-size: 13px;
+    always-on-top: root.keep-on-top;
+
+    in property <bool> dark: true;
+    in property <image> app-icon;
+    in property <bool> keep-on-top;
+
+    // Navigation & content
+    in property <[Tile]> tiles;
+    in property <string> heading: "Launchpad";
+    in property <string> subheading;
+    in property <bool> in-group;
+    in-out property <string> query;
+    in-out property <int> selected: -1;
+    in property <length> base-icon-size: 56px;
+    in property <length> spacing: 12px;
+    in property <bool> auto-fit;
+    property <bool> searching: root.query != "";
+
+    // Overlays
+    in property <bool> files-hovering;
+    in property <string> drop-target-name;
+    in property <string> status;
+    in property <bool> status-is-error;
+    in property <string> status-action;      // e.g. "Undo"; "" = none
+
+    // Dialog: "" | "rename" | "new-group" | "move" | "delete-group" | "first-run" | "migrate"
+    in property <string> dialog;
+    in property <string> dialog-title;
+    in property <string> dialog-message;
+    in-out property <string> dialog-text;
+    in property <[GroupChoice]> group-choices;
+
+    // Context menu target
+    property <Tile> menu-tile;
+    property <length> menu-x;
+    property <length> menu-y;
+
+    callback activate(string);
+    callback search-changed(string);
+    callback go-back();
+    callback hide-requested();
+    callback open-settings();
+    callback add-app();
+    callback add-folder();
+    callback new-group();
+    callback menu-action(string, string);    // action, item id
+    callback drop-tile(string, int, bool);   // id, target index, into the group at that index
+    callback dialog-confirm(string);         // the typed text, if any
+    callback dialog-cancel();
+    callback dialog-alt();                   // secondary action (e.g. "Ungroup")
+    callback move-to(string);                // group id
+    callback first-run-choice(bool);         // portable?
+    callback status-clicked();
+    callback dismiss-status();
+    pure callback fit-icon-size(length, length, int) -> length;
+
+    callback focus-search();
+    focus-search => {
+        search.focus-input();
+        search.select-all();
+    }
+
+    init => {
+        Palette.color-scheme = root.dark ? ColorScheme.dark : ColorScheme.light;
+    }
+    changed dark => {
+        Palette.color-scheme = root.dark ? ColorScheme.dark : ColorScheme.light;
+    }
+    changed dialog => {
+        if (root.dialog == "") {
+            search.focus-input();
+        }
+    }
+
+    // ── Grid geometry ──
+    property <length> pad: 16px;
+    property <length> gap: root.spacing;
+    property <length> grid-width: grid.visible-width;
+    property <length> icon-size: root.auto-fit && !root.searching
+        ? root.fit-icon-size(grid.visible-width - 2 * root.pad, grid.visible-height - 2 * root.pad, root.tiles.length)
+        : root.base-icon-size;
+    property <length> cell-w: max(88px, root.icon-size + 36px);
+    property <length> cell-h: root.icon-size + (root.searching ? 58px : 44px);
+    property <int> cols: max(1, floor((root.grid-width - 2 * root.pad + root.gap) / (root.cell-w + root.gap)));
+    property <int> rows: ceil(root.tiles.length / root.cols);
+    property <length> origin-x: max(root.pad, (root.grid-width - (root.cols * root.cell-w + (root.cols - 1) * root.gap)) / 2);
+
+    // ── Drag to reorder ──
+    property <int> drag-from: -1;
+    property <length> drag-dx;
+    property <length> drag-dy;
+    property <length> drag-cx: root.origin-x + mod(root.drag-from, root.cols) * (root.cell-w + root.gap) + root.cell-w / 2 + root.drag-dx;
+    property <length> drag-cy: root.pad + floor(root.drag-from / root.cols) * (root.cell-h + root.gap) + root.cell-h / 2 + root.drag-dy;
+    property <int> hover-col: clamp(floor((root.drag-cx - root.origin-x + root.gap / 2) / (root.cell-w + root.gap)), 0, root.cols - 1);
+    property <int> hover-row: max(0, floor((root.drag-cy - root.pad + root.gap / 2) / (root.cell-h + root.gap)));
+    property <int> drop-index: min(root.tiles.length - 1, root.hover-row * root.cols + root.hover-col);
+    property <length> drop-cell-x: root.origin-x + root.hover-col * (root.cell-w + root.gap);
+    property <length> drop-cell-y: root.pad + root.hover-row * (root.cell-h + root.gap);
+    // Over the middle of a group (and not dragging a group) → drop *into* it.
+    property <bool> drop-into: root.drag-from >= 0 && root.drop-index != root.drag-from
+        && root.tiles[root.drop-index].kind == 1 && root.tiles[root.drag-from].kind != 1
+        && abs(root.drag-cx - (root.drop-cell-x + root.cell-w / 2)) < root.cell-w * 0.32
+        && abs(root.drag-cy - (root.drop-cell-y + root.cell-h / 2)) < root.cell-h * 0.36;
+
+    function move-selection(dx: int, dy: int) {
+        if (root.tiles.length == 0) {
+            return;
+        }
+        if (root.selected < 0) {
+            root.selected = 0;
+        } else {
+            root.selected = clamp(root.selected + dx + dy * root.cols, 0, root.tiles.length - 1);
+        }
+        // Keep the selection in view.
+        if (floor(root.selected / root.cols) * (root.cell-h + root.gap) < -grid.content-y) {
+            grid.content-y = -(floor(root.selected / root.cols) * (root.cell-h + root.gap));
+        }
+        if (root.pad * 2 + (floor(root.selected / root.cols) + 1) * (root.cell-h + root.gap) > -grid.content-y + grid.visible-height) {
+            grid.content-y = -(root.pad * 2 + (floor(root.selected / root.cols) + 1) * (root.cell-h + root.gap) - grid.visible-height);
+        }
+    }
+
+    function open-menu(tile: Tile, x: length, y: length) {
+        root.menu-tile = tile;
+        root.menu-x = x;
+        root.menu-y = y;
+        item-menu.show();
+    }
+
+    // Shift+F10 / Menu key: the item menu for the selected tile, anchored on it.
+    public function open-selected-menu() {
+        if (root.selected < 0 || root.selected >= root.tiles.length) {
+            return;
+        }
+        root.open-menu(
+            root.tiles[root.selected],
+            grid.absolute-position.x + root.origin-x + mod(root.selected, root.cols) * (root.cell-w + root.gap) + root.cell-w / 2,
+            grid.absolute-position.y + grid.content-y + root.pad + floor(root.selected / root.cols) * (root.cell-h + root.gap) + root.cell-h / 2);
+    }
+
+    function selected-id() -> string {
+        return root.selected >= 0 && root.selected < root.tiles.length ? root.tiles[root.selected].id : "";
+    }
+
+    keys := FocusScope {
+        // Runs before the search field sees the key, so arrows / Enter drive the grid
+        // while typing still goes to the search box.
+        capture-key-pressed(e) => {
+            if (root.dialog != "") {
+                if (e.text == Key.Escape) {
+                    if (root.dialog != "first-run") {
+                        root.dialog-cancel();
+                    }
+                    return accept;
+                }
+                if (e.text == Key.Return && root.dialog != "move" && root.dialog != "first-run") {
+                    root.dialog-confirm(root.dialog-text);
+                    return accept;
+                }
+                if (root.dialog == "rename" || root.dialog == "new-group" || root.dialog == "move") {
+                    return reject;
+                }
+                return accept;
+            }
+            if (e.text == Key.UpArrow) {
+                root.move-selection(0, -1);
+                return accept;
+            }
+            if (e.text == Key.DownArrow) {
+                root.move-selection(0, 1);
+                return accept;
+            }
+            if (e.text == Key.LeftArrow && !root.searching) {
+                root.move-selection(-1, 0);
+                return accept;
+            }
+            if (e.text == Key.RightArrow && !root.searching) {
+                root.move-selection(1, 0);
+                return accept;
+            }
+            if (e.text == Key.Return) {
+                if (root.selected-id() != "") {
+                    root.activate(root.selected-id());
+                } else if (root.searching && root.tiles.length > 0) {
+                    root.activate(root.tiles[0].id);
+                }
+                return accept;
+            }
+            if (e.text == Key.Escape) {
+                if (root.searching) {
+                    root.query = "";
+                    root.search-changed("");
+                } else if (root.in-group) {
+                    root.go-back();
+                } else {
+                    root.hide-requested();
+                }
+                return accept;
+            }
+            if (e.text == Key.Backspace && !root.searching && root.in-group) {
+                root.go-back();
+                return accept;
+            }
+            if ((e.text == Key.F10 && e.modifiers.shift) || e.text == Key.Menu) {
+                root.open-selected-menu();
+                return accept;
+            }
+            if (e.text == Key.F2 && root.selected-id() != "") {
+                root.menu-action("rename", root.selected-id());
+                return accept;
+            }
+            if (e.text == Key.Delete && !root.searching && root.selected-id() != "") {
+                root.menu-action("remove", root.selected-id());
+                return accept;
+            }
+            if (e.text == "," && e.modifiers.control) {
+                root.open-settings();
+                return accept;
+            }
+            return reject;
+        }
+
+        VerticalLayout {
+            // ── Header ──────────────────────────────────────────
+            HorizontalLayout {
+                padding-left: root.in-group ? 10px : 18px;
+                padding-right: 12px;
+                padding-top: 12px;
+                padding-bottom: 8px;
+                spacing: 8px;
+                if root.in-group: VerticalLayout {
+                    alignment: center;
+                    IconButton {
+                        tooltip: "Back";
+                        clicked => { root.go-back(); }
+                        BackGlyph { stroke: Theme.text; }
+                    }
+                }
+                if !root.in-group: VerticalLayout {
+                    alignment: center;
+                    Image { source: root.app-icon; width: 24px; height: 24px; }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    spacing: 1px;
+                    horizontal-stretch: 1;
+                    Text {
+                        text: root.heading;
+                        font-size: 17px;
+                        font-weight: 750;
+                        color: Theme.text;
+                        overflow: elide;
+                    }
+                    if root.subheading != "": Text {
+                        text: root.subheading;
+                        font-size: 11.5px;
+                        color: Theme.text-faint;
+                        overflow: elide;
+                    }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    IconButton {
+                        tooltip: "Add";
+                        clicked => { add-menu.show(); }
+                        PlusGlyph { stroke: Theme.text; }
+                    }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    IconButton {
+                        tooltip: "Settings";
+                        clicked => { root.open-settings(); }
+                        GearGlyph { stroke: Theme.text; }
+                    }
+                }
+            }
+
+            // ── Search ──────────────────────────────────────────
+            HorizontalLayout {
+                padding-left: 16px;
+                padding-right: 16px;
+                padding-bottom: 4px;
+                search := TextField {
+                    leading: true;
+                    placeholder: "Search apps, folders and groups";
+                    text <=> root.query;
+                    edited(t) => {
+                        root.search-changed(t);
+                    }
+                    if root.searching: VerticalLayout {
+                        alignment: center;
+                        IconButton {
+                            width: 26px;
+                            height: 26px;
+                            tooltip: "Clear search";
+                            clicked => {
+                                root.query = "";
+                                root.search-changed("");
+                                search.focus-input();
+                            }
+                            CloseGlyph { width: 14px; height: 14px; }
+                        }
+                    }
+                }
+            }
+
+            // ── Grid ────────────────────────────────────────────
+            Rectangle {
+                vertical-stretch: 1;
+
+                grid := ScrollView {
+                    width: 100%;
+                    height: 100%;
+                    content-width: self.visible-width;
+                    content-height: max(self.visible-height, 2 * root.pad + root.rows * root.cell-h + max(0, root.rows - 1) * root.gap);
+
+                    for tile[i] in root.tiles: tv := TileView {
+                        x: root.origin-x + mod(i, root.cols) * (root.cell-w + root.gap) + (i == root.drag-from ? root.drag-dx : 0);
+                        y: root.pad + floor(i / root.cols) * (root.cell-h + root.gap) + (i == root.drag-from ? root.drag-dy : 0);
+                        z: i == root.drag-from ? 2 : 0;
+                        width: root.cell-w;
+                        height: root.cell-h;
+                        tile: tile;
+                        icon-size: root.icon-size;
+                        selected: i == root.selected && root.drag-from < 0;
+                        lifted: i == root.drag-from;
+                        drop-target: root.drop-into && i == root.drop-index;
+                        can-drag: !root.searching;
+                        show-location: root.searching;
+                        pressed-tile => { root.selected = i; }
+                        activate => { root.selected = i; root.activate(tile.id); }
+                        context(mx, my) => {
+                            root.selected = i;
+                            root.open-menu(tile, tv.absolute-position.x + mx, tv.absolute-position.y + my);
+                        }
+                        drag-move(dx, dy) => {
+                            root.drag-from = i;
+                            root.drag-dx = dx;
+                            root.drag-dy = dy;
+                        }
+                        drag-end => {
+                            if (root.drag-from >= 0) {
+                                root.drop-tile(tile.id, root.drop-index, root.drop-into);
+                            }
+                            root.drag-from = -1;
+                            root.drag-dx = 0;
+                            root.drag-dy = 0;
+                        }
+                    }
+
+                    // Where the dragged tile will land.
+                    if root.drag-from >= 0 && !root.drop-into && root.drop-index != root.drag-from: Rectangle {
+                        x: root.drop-index < root.drag-from ? root.drop-cell-x - root.gap / 2 - 1.5px : root.drop-cell-x + root.cell-w + root.gap / 2 - 1.5px;
+                        y: root.drop-cell-y + 8px;
+                        width: 3px;
+                        height: root.cell-h - 16px;
+                        border-radius: 1.5px;
+                        background: Theme.accent;
+                    }
+                }
+
+                // Empty states
+                if root.tiles.length == 0: VerticalLayout {
+                    alignment: center;
+                    spacing: 8px;
+                    padding: 24px;
+                    HorizontalLayout {
+                        alignment: center;
+                        Rectangle {
+                            width: 64px;
+                            height: 64px;
+                            border-radius: 18px;
+                            background: Theme.accent-soft;
+                            if root.searching: SearchGlyph { width: 28px; height: 28px; stroke: Theme.accent; }
+                            if !root.searching: GroupGlyph { width: 28px; height: 28px; stroke: Theme.accent; }
+                        }
+                    }
+                    Text {
+                        text: root.searching ? "No matches" : (root.in-group ? "This group is empty" : "Nothing here yet");
+                        font-size: 15px;
+                        font-weight: 700;
+                        color: Theme.text;
+                        horizontal-alignment: center;
+                    }
+                    Text {
+                        text: root.searching
+                            ? "Nothing is called “" + root.query + "”."
+                            : "Drag apps, shortcuts or folders onto this window, or add them here.";
+                        font-size: 12.5px;
+                        color: Theme.text-muted;
+                        horizontal-alignment: center;
+                        wrap: word-wrap;
+                    }
+                    if !root.searching: HorizontalLayout {
+                        alignment: center;
+                        spacing: 8px;
+                        padding-top: 6px;
+                        Button { text: "Add app…"; primary: true; clicked => { root.add-app(); } }
+                        Button { text: "Add folder…"; clicked => { root.add-folder(); } }
+                    }
+                }
+
+                // Files dragged in from Explorer
+                if root.files-hovering: Rectangle {
+                    x: 10px;
+                    y: 6px;
+                    width: parent.width - 20px;
+                    height: parent.height - 16px;
+                    border-radius: 16px;
+                    border-width: 2px;
+                    border-color: Theme.accent;
+                    background: Theme.dark ? #0d0f13e6 : #f3f4f7e6;
+                    VerticalLayout {
+                        alignment: center;
+                        spacing: 8px;
+                        HorizontalLayout {
+                            alignment: center;
+                            Rectangle {
+                                width: 56px;
+                                height: 56px;
+                                border-radius: 28px;
+                                background: Theme.accent-soft;
+                                PlusGlyph { width: 26px; height: 26px; stroke: Theme.accent; stroke-width: 2.2px; }
+                            }
+                        }
+                        Text {
+                            text: "Drop to add to " + root.drop-target-name;
+                            font-size: 15px;
+                            font-weight: 700;
+                            color: Theme.text;
+                            horizontal-alignment: center;
+                        }
+                        Text {
+                            text: "Apps, shortcuts, files and folders";
+                            font-size: 12px;
+                            color: Theme.text-muted;
+                            horizontal-alignment: center;
+                        }
+                    }
+                }
+            }
+
+            // ── Status banner ───────────────────────────────────
+            if root.status != "": HorizontalLayout {
+                padding-left: 16px;
+                padding-right: 16px;
+                padding-bottom: 12px;
+                Rectangle {
+                    border-radius: 10px;
+                    background: root.status-is-error ? Theme.danger-soft : Theme.surface;
+                    border-width: 1px;
+                    border-color: root.status-is-error ? transparent : Theme.border;
+                    HorizontalLayout {
+                        padding-left: 12px;
+                        padding-right: 6px;
+                        padding-top: 6px;
+                        padding-bottom: 6px;
+                        spacing: 8px;
+                        Text {
+                            text: root.status;
+                            font-size: 12px;
+                            color: Theme.text;
+                            wrap: word-wrap;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+                        if root.status-action != "": Rectangle {
+                            height: 26px;
+                            border-radius: 7px;
+                            background: act.has-hover ? Theme.accent-soft : transparent;
+                            HorizontalLayout {
+                                padding-left: 10px;
+                                padding-right: 10px;
+                                Text { text: root.status-action; font-size: 12px; font-weight: 700; color: Theme.accent; vertical-alignment: center; }
+                            }
+                            act := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.status-clicked(); }
+                            }
+                        }
+                        IconButton {
+                            width: 26px;
+                            height: 26px;
+                            tooltip: "Dismiss";
+                            clicked => { root.dismiss-status(); }
+                            CloseGlyph { width: 13px; height: 13px; }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── Dialogs ─────────────────────────────────────────────
+        if root.dialog != "": Rectangle {
+            background: Theme.scrim;
+            TouchArea {
+                clicked => {
+                    if (root.dialog != "first-run") {
+                        root.dialog-cancel();
+                    }
+                }
+            }
+            VerticalLayout {
+                alignment: center;
+                padding: 20px;
+                HorizontalLayout {
+                    alignment: center;
+                    Rectangle {
+                        width: min(root.dialog == "first-run" ? 460px : 400px, root.width - 40px);
+                        background: Theme.surface;
+                        border-radius: 16px;
+                        border-width: 1px;
+                        border-color: Theme.border-strong;
+                        drop-shadow-blur: 30px;
+                        drop-shadow-offset-y: 10px;
+                        drop-shadow-color: #00000070;
+                        TouchArea { }   // swallow clicks so they don't reach the scrim
+
+                        VerticalLayout {
+                            padding: 20px;
+                            spacing: 12px;
+                            Text {
+                                text: root.dialog-title;
+                                font-size: 16px;
+                                font-weight: 700;
+                                color: Theme.text;
+                                wrap: word-wrap;
+                            }
+                            if root.dialog-message != "": Text {
+                                text: root.dialog-message;
+                                font-size: 12.5px;
+                                color: Theme.text-muted;
+                                wrap: word-wrap;
+                            }
+
+                            if root.dialog == "rename" || root.dialog == "new-group": TextField {
+                                text <=> root.dialog-text;
+                                placeholder: "Name";
+                                init => {
+                                    self.focus-input();
+                                    self.select-all();
+                                }
+                                accepted(t) => { root.dialog-confirm(t); }
+                            }
+
+                            if root.dialog == "move": VerticalLayout {
+                                spacing: 2px;
+                                // Many groups: scroll inside the dialog instead of
+                                // growing past the window.
+                                if root.group-choices.length > 0: ScrollView {
+                                    height: min(root.group-choices.length * 42px, max(84px, root.height - 300px));
+                                    VerticalLayout {
+                                        padding-right: 12px;   // keep clear of the scrollbar
+                                        spacing: 2px;
+                                        for choice in root.group-choices: GroupChoiceRow {
+                                            choice: choice;
+                                            picked => { root.move-to(choice.id); }
+                                        }
+                                    }
+                                }
+                                if root.group-choices.length == 0: Text {
+                                    text: "You don't have any groups yet. Name one below to create it.";
+                                    font-size: 12px;
+                                    color: Theme.text-faint;
+                                    wrap: word-wrap;
+                                }
+                                HorizontalLayout {
+                                    padding-top: 8px;
+                                    spacing: 8px;
+                                    TextField {
+                                        horizontal-stretch: 1;
+                                        text <=> root.dialog-text;
+                                        placeholder: "New group name";
+                                        init => { self.focus-input(); }
+                                        accepted(t) => { if (t != "") { root.dialog-confirm(t); } }
+                                    }
+                                    Button {
+                                        text: "Create";
+                                        enabled: root.dialog-text != "";
+                                        clicked => { root.dialog-confirm(root.dialog-text); }
+                                    }
+                                }
+                            }
+
+                            if root.dialog == "first-run": VerticalLayout {
+                                spacing: 10px;
+                                StorageOption {
+                                    title: "Standard";
+                                    detail: "Settings are kept in your user profile (AppData). Best for an installed app.";
+                                    recommended: true;
+                                    picked => { root.first-run-choice(false); }
+                                }
+                                StorageOption {
+                                    title: "Portable";
+                                    detail: "Settings are kept in config.json next to launchpad.exe. Best for a USB drive or a synced folder.";
+                                    picked => { root.first-run-choice(true); }
+                                }
+                            }
+
+                            if root.dialog != "first-run": HorizontalLayout {
+                                alignment: end;
+                                spacing: 8px;
+                                padding-top: 4px;
+                                Button {
+                                    text: root.dialog == "move" ? "Close" : (root.dialog == "migrate" ? "Not now" : "Cancel");
+                                    clicked => { root.dialog-cancel(); }
+                                }
+                                if root.dialog == "delete-group": Button {
+                                    text: "Ungroup";
+                                    clicked => { root.dialog-alt(); }
+                                }
+                                if root.dialog == "delete-group": Button {
+                                    text: "Delete";
+                                    danger: true;
+                                    clicked => { root.dialog-confirm(""); }
+                                }
+                                if root.dialog == "rename" || root.dialog == "new-group": Button {
+                                    text: root.dialog == "rename" ? "Rename" : "Create";
+                                    primary: true;
+                                    enabled: root.dialog-text != "";
+                                    clicked => { root.dialog-confirm(root.dialog-text); }
+                                }
+                                if root.dialog == "migrate": Button {
+                                    text: "Copy icons";
+                                    primary: true;
+                                    clicked => { root.dialog-confirm(""); }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Menus ───────────────────────────────────────────────────
+    item-menu := PopupWindow {
+        x: clamp(root.menu-x, 8px, max(8px, root.width - 228px));
+        y: clamp(root.menu-y, 8px, max(8px, root.height - 330px));
+        width: 220px;
+        MenuPanel {
+            MenuEntry {
+                text: root.menu-tile.kind == 1 ? "Open group" : (root.menu-tile.kind == 2 ? "Open folder" : "Open");
+                clicked => { root.menu-action("open", root.menu-tile.id); }
+                OpenGlyph { width: 16px; height: 16px; }
+            }
+            if root.menu-tile.kind != 1: MenuEntry {
+                text: "Show in Explorer";
+                clicked => { root.menu-action("reveal", root.menu-tile.id); }
+                FolderGlyph { width: 16px; height: 16px; }
+            }
+            MenuSeparator { }
+            MenuEntry {
+                text: "Rename…";
+                hint: "F2";
+                clicked => { root.menu-action("rename", root.menu-tile.id); }
+                PencilGlyph { width: 16px; height: 16px; }
+            }
+            MenuEntry {
+                text: "Change icon…";
+                clicked => { root.menu-action("icon", root.menu-tile.id); }
+                ImageGlyph { width: 16px; height: 16px; }
+            }
+            if root.menu-tile.custom-icon: MenuEntry {
+                text: "Reset icon";
+                clicked => { root.menu-action("reset-icon", root.menu-tile.id); }
+                ResetGlyph { width: 16px; height: 16px; }
+            }
+            if root.menu-tile.kind != 1: MenuEntry {
+                text: "Move to group…";
+                clicked => { root.menu-action("move", root.menu-tile.id); }
+                MoveInGlyph { width: 16px; height: 16px; }
+            }
+            if root.menu-tile.in-group: MenuEntry {
+                text: "Move out of group";
+                clicked => { root.menu-action("move-out", root.menu-tile.id); }
+                MoveOutGlyph { width: 16px; height: 16px; }
+            }
+            if root.menu-tile.kind == 1: MenuEntry {
+                text: "Ungroup";
+                clicked => { root.menu-action("ungroup", root.menu-tile.id); }
+                MoveOutGlyph { width: 16px; height: 16px; }
+            }
+            MenuSeparator { }
+            MenuEntry {
+                text: root.menu-tile.kind == 1 ? "Delete group…" : "Remove";
+                hint: root.menu-tile.kind == 1 ? "" : "Del";
+                danger: true;
+                clicked => { root.menu-action("remove", root.menu-tile.id); }
+                TrashGlyph { width: 16px; height: 16px; stroke: Theme.danger; }
+            }
+        }
+    }
+
+    add-menu := PopupWindow {
+        x: root.width - 232px;
+        y: 50px;
+        width: 220px;
+        MenuPanel {
+            MenuEntry {
+                text: "Add app…";
+                clicked => { root.add-app(); }
+                AppGlyph { width: 16px; height: 16px; }
+            }
+            MenuEntry {
+                text: "Add folder…";
+                clicked => { root.add-folder(); }
+                FolderGlyph { width: 16px; height: 16px; }
+            }
+            if !root.in-group: MenuEntry {
+                text: "New group…";
+                clicked => { root.new-group(); }
+                GroupGlyph { width: 16px; height: 16px; }
+            }
+        }
+    }
+}

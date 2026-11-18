@@ -1,3 +1,5 @@
+> **Historical document.** This is the original egui-era plan. The UI is now Slint; see [technical-reference.md](technical-reference.md) for the current design.
+
 I'll start by examining the current state of the project directory, then produce a comprehensive architecture and planning document.
 
 The project is empty except for the prompt. Let me now produce a thorough architecture and planning document. I'll research the crate ecosystem quickly to validate my recommendations.

@@ -1,1484 +1,1359 @@
-use crossbeam::channel::Receiver;
-use egui::Context;
-use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock};
+//! Application controller. Lives on the main (Slint event-loop) thread and glues the
+//! UI, config, hotkey, tray and the icon worker together. Callbacks reach it through
+//! `with_app(|a| ...)`.
+//!
+//! The launcher window is created once and only hidden/shown, so the hotkey brings it
+//! up instantly. The Settings window is built on demand and destroyed when closed.
 
-use crate::commands;
-use crate::config::manager::{Config, ConfigManager};
+use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
+use std::sync::mpsc;
+use std::time::Duration;
+
+use slint::winit_030::winit::event::{ElementState, MouseButton, WindowEvent};
+use slint::winit_030::{EventResult, WinitWindowAccessor};
+use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
+
+use crate::commands::items::{self, Parent};
+use crate::config::manager::{expand_path, Config, ConfigManager};
 use crate::models::item::{ItemId, LaunchItem};
-use crate::platform::hotkey;
-use crate::platform::tray::TrayEvent;
-use crate::ui::icons::IconCache;
+use crate::platform::autostart;
+use crate::platform::hotkey::{self, capture_from_key_event, Capture, Hotkey};
+use crate::platform::shell::{self, IconSource, Rgba};
+use crate::platform::tray::{Tray, TrayCommand};
+use crate::ui::{self, theme};
+use crate::{GroupChoice, MainWindow, SettingsWindow, ThemeColors, ThemeOption, Tile};
 
-/// Global egui context so background threads can wake the UI.
-static UI_CTX: OnceLock<Mutex<Context>> = OnceLock::new();
+const SAVE_DELAY: Duration = Duration::from_millis(600);
+const STATUS_FOR: Duration = Duration::from_secs(5);
+const ERROR_FOR: Duration = Duration::from_secs(8);
+const CAPTURE_HINT: &str = "Press the new combination · Esc cancels · Backspace clears";
 
-/// Wake egui's event loop from any thread (hotkey, tray, etc).
-pub fn wake_ui() {
-    if let Some(m) = UI_CTX.get() {
-        if let Ok(ctx) = m.lock() {
-            ctx.request_repaint();
+thread_local! {
+    static APP: RefCell<Option<Rc<App>>> = const { RefCell::new(None) };
+}
+
+/// Run `f` with the app, if it exists. Safe to call from any event-loop callback.
+pub fn with_app<R>(f: impl FnOnce(&Rc<App>) -> R) -> Option<R> {
+    let app = APP.with(|a| a.borrow().clone());
+    app.map(|a| f(&a))
+}
+
+/// Run `f` on the UI thread from any thread.
+fn on_ui(f: impl FnOnce(&Rc<App>) + Send + 'static) {
+    let _ = slint::invoke_from_event_loop(move || {
+        with_app(f);
+    });
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Dialog {
+    None,
+    Rename(ItemId),
+    NewGroup,
+    Move(ItemId),
+    DeleteGroup(ItemId),
+    FirstRun,
+    Migrate,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum StatusAction {
+    None,
+    Undo,
+}
+
+pub struct App {
+    cfg: RefCell<Config>,
+    store: RefCell<ConfigManager>,
+    window: MainWindow,
+    settings: RefCell<Option<SettingsWindow>>,
+
+    tiles: Rc<VecModel<Tile>>,
+    group_choices: Rc<VecModel<GroupChoice>>,
+    theme_options: Rc<VecModel<ThemeOption>>,
+
+    nav: Cell<Parent>,
+    /// The group "Back" just left, for the mouse's Forward button.
+    forward: Cell<Parent>,
+    query: RefCell<String>,
+    dialog: Cell<Dialog>,
+    migration: RefCell<Vec<(ItemId, PathBuf)>>,
+    /// Item tree before the last removal, for "Undo".
+    undo: RefCell<Option<Vec<LaunchItem>>>,
+    status_action: Cell<StatusAction>,
+
+    icons: RefCell<HashMap<IconSource, Option<slint::Image>>>,
+    pending_icons: RefCell<HashSet<IconSource>>,
+    icon_tx: mpsc::Sender<IconSource>,
+    missing: RefCell<HashMap<PathBuf, bool>>,
+
+    hotkey: RefCell<Option<Hotkey>>,
+    hotkey_error: RefCell<String>,
+    capturing: Cell<bool>,
+    tray: RefCell<Option<Tray>>,
+
+    dropped: RefCell<Vec<PathBuf>>,
+    geometry_restored: Cell<bool>,
+    geometry_dirty: Cell<bool>,
+    refresh_pending: Cell<bool>,
+    save_timer: slint::Timer,
+    status_timer: slint::Timer,
+    started: std::time::Instant,
+}
+
+impl App {
+    pub fn start(start_hidden: bool) -> Result<Rc<App>, String> {
+        let store = ConfigManager::new().map_err(|e| e.to_string())?;
+        let cfg = store.load();
+        log::info!("Config: {} ({} items)", store.path().display(), cfg.items.len());
+
+        let window = MainWindow::new().map_err(|e| e.to_string())?;
+        let icon_tx = shell::spawn_icon_worker(|source, icon| on_ui(move |a| a.icon_ready(source, icon)));
+
+        let app = Rc::new(App {
+            cfg: RefCell::new(cfg),
+            store: RefCell::new(store),
+            window,
+            settings: RefCell::new(None),
+            tiles: Rc::new(VecModel::default()),
+            group_choices: Rc::new(VecModel::default()),
+            theme_options: Rc::new(VecModel::default()),
+            nav: Cell::new(None),
+            forward: Cell::new(None),
+            query: RefCell::default(),
+            dialog: Cell::new(Dialog::None),
+            migration: RefCell::default(),
+            undo: RefCell::new(None),
+            status_action: Cell::new(StatusAction::None),
+            icons: RefCell::default(),
+            pending_icons: RefCell::default(),
+            icon_tx,
+            missing: RefCell::default(),
+            hotkey: RefCell::new(None),
+            hotkey_error: RefCell::default(),
+            capturing: Cell::new(false),
+            tray: RefCell::new(None),
+            dropped: RefCell::default(),
+            geometry_restored: Cell::new(false),
+            geometry_dirty: Cell::new(false),
+            refresh_pending: Cell::new(false),
+            save_timer: slint::Timer::default(),
+            status_timer: slint::Timer::default(),
+            started: std::time::Instant::now(),
+        });
+        APP.with(|a| *a.borrow_mut() = Some(app.clone()));
+
+        app.wire_main_window();
+        app.apply_theme();
+        app.push_layout();
+
+        match Hotkey::new(|| on_ui(|a| a.toggle_window())) {
+            Ok(h) => *app.hotkey.borrow_mut() = Some(h),
+            Err(e) => log::error!("global hotkey unavailable: {e}"),
         }
-    }
-}
+        app.apply_hotkey();
 
-pub struct LaunchpadApp {
-    hotkey_rx: Receiver<()>,
-    tray_rx: Receiver<TrayEvent>,
-    config: Config,
-    config_manager: ConfigManager,
-    dirty: bool,
-    nav_stack: Vec<ItemId>,
-    selected_index: Option<usize>,
-    icon_cache: IconCache,
-    show_settings: bool,
-    show_first_run_setup: bool,
-    context_menu: Option<ContextMenuState>,
-    pos_restored: bool,
-    pending_rename: Option<(ItemId, String)>,
-    pending_group_select: Option<ItemId>,
-    pending_delete_group: Option<ItemId>,
-    resizing: Option<ResizeEdge>,
-    resize_start: Option<egui::Pos2>,
-    show_reorder: bool,
-    auto_fit: bool,
-    pending_hotkey: String,
-    search_query: String,
-    icon_migration: Vec<(ItemId, PathBuf)>,
-    icon_migration_done: bool,
-}
+        // The tray must be created once the event loop runs.
+        slint::Timer::single_shot(Duration::ZERO, || {
+            with_app(|a| a.init_tray());
+        });
 
-#[derive(Clone)]
-struct ContextMenuState {
-    item_index: usize,
-    pos: egui::Pos2,
-}
-#[derive(Clone, Copy, PartialEq, Debug)]
-enum ResizeEdge {
-    Bottom,
-    Right,
-    Corner,
-}
-
-impl LaunchpadApp {
-    pub fn new(
-        hotkey_rx: Receiver<()>,
-        tray_rx: Receiver<TrayEvent>,
-        config: Config,
-        config_manager: ConfigManager,
-    ) -> Self {
-        let hotkey_str = config.hotkey.clone();
-        let pending = config_manager.pending_first_run;
-        let icons_dir = config_manager.icons_dir();
-        Self {
-            hotkey_rx,
-            tray_rx,
-            config,
-            config_manager,
-            dirty: false,
-            show_first_run_setup: pending,
-            nav_stack: Vec::new(),
-            selected_index: None,
-            icon_cache: IconCache::new(icons_dir),
-            show_settings: false,
-            context_menu: None,
-            pos_restored: false,
-            pending_rename: None,
-            pending_group_select: None,
-            pending_delete_group: None,
-            resizing: None,
-            resize_start: None,
-            show_reorder: false,
-            auto_fit: false,
-            pending_hotkey: hotkey_str,
-            search_query: String::new(),
-            icon_migration: Vec::new(),
-            icon_migration_done: false,
-        }
-    }
-    fn mark_dirty(&mut self) {
-        self.dirty = true;
-    }
-    fn save_if_dirty(&mut self) {
-        if self.dirty && !self.config_manager.pending_first_run {
-            if let Err(e) = self.config_manager.save(&self.config) {
-                log::error!("Save: {}", e);
-            } else {
-                self.dirty = false;
-            }
-        }
-    }
-    fn current_items(&self) -> &[LaunchItem] {
-        if let Some(&gid) = self.nav_stack.last() {
-            for item in &self.config.items {
-                if let LaunchItem::Group(g) = item {
-                    if g.id == gid {
-                        return &g.items;
-                    }
-                }
-            }
-            &[]
+        let first_run = app.store.borrow().pending_first_run;
+        if first_run {
+            app.open_dialog(
+                Dialog::FirstRun,
+                "Welcome to Launchpad",
+                "Where should Launchpad keep its settings? You can't change this later without moving config.json.",
+                "",
+            );
         } else {
-            &self.config.items
+            app.check_icon_migration();
         }
-    }
-    fn is_at_root(&self) -> bool {
-        self.nav_stack.is_empty()
-    }
-    fn navigate_to_root(&mut self) {
-        self.nav_stack.clear();
-        self.selected_index = None;
-        self.context_menu = None;
-    }
-    fn navigate_into(&mut self, gid: ItemId) {
-        self.nav_stack.push(gid);
-        self.selected_index = None;
-        self.context_menu = None;
-    }
-    fn navigate_back(&mut self) {
-        self.nav_stack.pop();
-        self.selected_index = None;
-        self.context_menu = None;
-    }
-    fn activate_item(&mut self, item: &LaunchItem) {
-        match item {
-            LaunchItem::App(a) => {
-                #[cfg(windows)]
-                {
-                    use std::os::windows::ffi::OsStrExt;
-                    use windows::core::PCWSTR;
-                    use windows::Win32::UI::Shell::ShellExecuteW;
-                    use windows::Win32::UI::WindowsAndMessaging::SW_SHOW;
-                    let exe: Vec<u16> = a
-                        .executable_path
-                        .as_os_str()
-                        .encode_wide()
-                        .chain(std::iter::once(0))
-                        .collect();
-                    let dir: Vec<u16> = a
-                        .executable_path
-                        .parent()
-                        .map(|p| {
-                            p.as_os_str()
-                                .encode_wide()
-                                .chain(std::iter::once(0))
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    unsafe {
-                        ShellExecuteW(
-                            None,
-                            PCWSTR::null(),
-                            PCWSTR::from_raw(exe.as_ptr()),
-                            PCWSTR::null(),
-                            if dir.is_empty() {
-                                PCWSTR::null()
-                            } else {
-                                PCWSTR::from_raw(dir.as_ptr())
-                            },
-                            SW_SHOW,
-                        );
-                    }
-                }
-                #[cfg(not(windows))]
-                {
-                    let mut cmd = std::process::Command::new(&a.executable_path);
-                    if let Some(parent) = a.executable_path.parent() {
-                        cmd.current_dir(parent);
-                    }
-                    let _ = cmd.spawn();
-                }
-                if self.config.hide_on_launch {
-                    self.minimize();
-                }
-            }
-            LaunchItem::Group(g) => self.navigate_into(g.id),
-            LaunchItem::Folder(f) => {
-                let _ = std::process::Command::new("explorer")
-                    .arg(&f.folder_path)
-                    .spawn();
-                if self.config.hide_on_launch {
-                    self.minimize();
-                }
-            }
+
+        app.refresh();
+        if !start_hidden || first_run {
+            app.show_window();
         }
+        Ok(app)
     }
-    fn minimize(&self) {
-        if let Some(m) = UI_CTX.get() {
-            if let Ok(ctx) = m.lock() {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
-            }
-        }
+
+    /// Tear down in a safe order.
+    pub fn shutdown() {
+        let Some(app) = APP.with(|a| a.borrow_mut().take()) else { return };
+        app.remember_geometry();
+        app.save_now();
+        app.settings.borrow_mut().take();
+        app.tray.borrow_mut().take();
+        app.hotkey.borrow_mut().take();
+        let _ = app.window.hide();
     }
-    fn has_custom_icon(&self, id: ItemId) -> bool {
-        for item in &self.config.items {
-            match item {
-                LaunchItem::App(a) if a.id == id => return a.icon_path.is_some(),
-                LaunchItem::Group(g) if g.id == id => return g.icon_path.is_some(),
-                LaunchItem::Folder(f) if f.id == id => return f.icon_path.is_some(),
+
+    // ── Wiring ─────────────────────────────────────────────────────────────────
+
+    fn wire_main_window(&self) {
+        let w = &self.window;
+        w.set_app_icon(ui::app_icon_image(64));
+        w.set_tiles(ModelRc::from(self.tiles.clone()));
+        w.set_group_choices(ModelRc::from(self.group_choices.clone()));
+
+        w.window().on_close_requested(|| {
+            with_app(|a| {
+                if a.cfg.borrow().close_to_tray && a.tray.borrow().is_some() {
+                    a.hide_window();
+                } else {
+                    a.quit();
+                }
+            });
+            slint::CloseRequestResponse::HideWindow
+        });
+
+        w.window().on_winit_window_event(|_, event| {
+            match event {
+                WindowEvent::HoveredFile(_) => on_ui(|a| a.set_files_hovering(true)),
+                WindowEvent::HoveredFileCancelled => on_ui(|a| a.set_files_hovering(false)),
+                // Mouse side buttons navigate like a browser.
+                WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Back, .. } => {
+                    on_ui(|a| a.nav_back());
+                }
+                WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Forward, .. } => {
+                    on_ui(|a| a.nav_forward());
+                }
+                WindowEvent::DroppedFile(path) => {
+                    let path = path.clone();
+                    on_ui(move |a| a.file_dropped(path));
+                }
+                WindowEvent::Moved(_) | WindowEvent::Resized(_) => {
+                    // Read the geometry later (never borrow app state inside winit's dispatch).
+                    on_ui(|a| {
+                        if a.geometry_restored.get() {
+                            a.geometry_dirty.set(true);
+                            a.schedule_save();
+                        }
+                    });
+                }
                 _ => {}
             }
-        }
-        for item in &self.config.items {
-            if let LaunchItem::Group(g) = item {
-                for sub in &g.items {
-                    match sub {
-                        LaunchItem::App(a) if a.id == id => return a.icon_path.is_some(),
-                        LaunchItem::Folder(f) if f.id == id => return f.icon_path.is_some(),
-                        _ => {}
-                    }
-                }
-            }
-        }
-        false
-    }
-}
-
-/// Compute the largest icon size that fits `n` items in the given area.
-fn compute_fit_icon_size(n: usize, sp: f32, tw: f32, th: f32) -> f32 {
-    if n == 0 {
-        return 48.0;
-    }
-    let mut lo = 12.0_f32;
-    let mut hi = 256.0_f32;
-    let mut best = 24.0_f32;
-    for _ in 0..30 {
-        let mid = (lo + hi) / 2.0;
-        let iw = mid + 48.0;
-        let ih = mid + 28.0;
-        let cols = ((tw + sp) / (iw + sp)).floor() as usize;
-        if cols == 0 {
-            hi = mid;
-            continue;
-        }
-        let rows = (n + cols - 1) / cols;
-        let needed_h = rows as f32 * (ih + sp) - sp;
-        let needed_w = cols as f32 * (iw + sp) - sp;
-        if needed_h <= th && needed_w <= tw {
-            best = mid;
-            lo = mid;
-        } else {
-            hi = mid;
-        }
-    }
-    best.clamp(12.0, 200.0)
-}
-
-impl eframe::App for LaunchpadApp {
-    fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
-        UI_CTX.get_or_init(|| Mutex::new(ctx.clone()));
-
-        // Process hotkey — toggle window visibility
-        let mut hotkey_fired = false;
-        while self.hotkey_rx.try_recv().is_ok() {
-            hotkey_fired = true;
-        }
-        if hotkey_fired {
-            log::info!("Processing hotkey toggle");
-            let minimized = ctx.input(|i| i.viewport().minimized.unwrap_or(false));
-            if minimized {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-            } else {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
-            }
-        }
-
-        // Process tray events
-        while let Ok(ev) = self.tray_rx.try_recv() {
-            log::info!("Processing tray event: {:?}", ev);
-            match ev {
-                TrayEvent::Toggle => {
-                    if ctx.input(|i| i.viewport().minimized.unwrap_or(false)) {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-                    } else {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
-                    }
-                }
-                TrayEvent::Quit => {
-                    self.save_if_dirty();
-                    std::process::exit(0);
-                }
-            }
-        }
-        if !self.pos_restored {
-            self.pos_restored = true;
-            // Scan for icons using the old format (external paths instead of icons/ folder)
-            if !self.icon_migration_done {
-                self.icon_migration_done = true;
-                let icons_dir = self.config_manager.icons_dir();
-                self.icon_migration = find_external_icons(&self.config, &icons_dir);
-                if !self.icon_migration.is_empty() {
-                    log::info!(
-                        "Found {} icon(s) using old format (external path)",
-                        self.icon_migration.len()
-                    );
-                }
-            }
-            if let (Some(x), Some(y)) = (self.config.window_x, self.config.window_y) {
-                ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::Pos2::new(x, y)));
-            }
-            if let (Some(w), Some(h)) = (self.config.window_width, self.config.window_height) {
-                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::Vec2::new(w, h)));
-            }
-        }
-        // Persist window geometry whenever it changes
-        ctx.input(|i| {
-            if let Some(r) = i.viewport().outer_rect {
-                let nx = r.min.x;
-                let ny = r.min.y;
-                if self.config.window_x != Some(nx) || self.config.window_y != Some(ny) {
-                    self.config.window_x = Some(nx);
-                    self.config.window_y = Some(ny);
-                    self.mark_dirty();
-                }
-            }
-            if let Some(r) = i.viewport().inner_rect {
-                let nw = r.width();
-                let nh = r.height();
-                if self.config.window_width != Some(nw) || self.config.window_height != Some(nh) {
-                    self.config.window_width = Some(nw);
-                    self.config.window_height = Some(nh);
-                    self.mark_dirty();
-                }
-            }
-        });
-        self.handle_dropped_files(ctx);
-        // Resize handling
-        if let Some(edge) = self.resizing {
-            if ctx.input(|i| i.pointer.any_released()) {
-                self.resizing = None;
-                self.resize_start = None;
-            } else if let Some(pos) = ctx.input(|i| i.pointer.hover_pos()) {
-                if let Some(start) = self.resize_start {
-                    let delta = pos - start;
-                    let cur = ctx.input(|i| {
-                        i.viewport()
-                            .inner_rect
-                            .map(|r| r.size())
-                            .unwrap_or(egui::vec2(640.0, 480.0))
-                    });
-                    let min = egui::vec2(200.0, 200.0);
-                    match edge {
-                        ResizeEdge::Right => {
-                            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
-                                (cur.x + delta.x).max(min.x),
-                                cur.y,
-                            )))
-                        }
-                        ResizeEdge::Bottom => {
-                            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
-                                cur.x,
-                                (cur.y + delta.y).max(min.y),
-                            )))
-                        }
-                        ResizeEdge::Corner => {
-                            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
-                                (cur.x + delta.x).max(min.x),
-                                (cur.y + delta.y).max(min.y),
-                            )))
-                        }
-                    }
-                    self.resize_start = Some(pos);
-                }
-            }
-        }
-        self.save_if_dirty();
-        crate::ui::theme::apply_theme(ctx, &self.config);
-        let theme = self.config.resolve_theme();
-        let header_color =
-            hex_opt(&theme.header_color).unwrap_or(egui::Color32::from_rgb(0x31, 0x33, 0x37));
-        let accent_color =
-            hex_opt(&theme.divider_color).unwrap_or(egui::Color32::from_rgb(0x3D, 0x3F, 0x43));
-        egui::TopBottomPanel::top("title_bar")
-            .frame(
-                egui::Frame::NONE
-                    .fill(header_color)
-                    .inner_margin(egui::Margin::symmetric(8, 0)),
-            )
-            .show(ctx, |ui| self.render_title_bar(ui, accent_color));
-        if self.show_settings {
-            let center = ctx.screen_rect().center();
-            egui::Window::new("Settings")
-                .default_pos(center)
-                .collapsible(false)
-                .resizable(false)
-                .movable(true)
-                .constrain(false)
-                .show(ctx, |ui| self.render_settings(ui));
-        }
-        if let Some(ref cm) = self.context_menu.clone() {
-            self.render_context_menu(ctx, cm);
-        }
-        if let Some((id, ref mut text)) = self.pending_rename.clone() {
-            let mut t = text.clone();
-            let item_id = id;
-            let center = ctx.screen_rect().center();
-            egui::Window::new("Rename")
-                .default_pos(center)
-                .collapsible(false)
-                .resizable(false)
-                .movable(true)
-                .constrain(false)
-                .show(ctx, |ui| {
-                    ui.label("New name:");
-                    ui.text_edit_singleline(&mut t);
-                    ui.horizontal(|ui| {
-                        if ui.button("OK").clicked()
-                            || ui.input(|i| i.key_pressed(egui::Key::Enter))
-                        {
-                            let _ =
-                                commands::items::rename_item(&mut self.config, item_id, t.clone());
-                            self.mark_dirty();
-                            self.pending_rename = None;
-                        }
-                        if ui.button("Cancel").clicked() {
-                            self.pending_rename = None;
-                        }
-                    });
-                });
-            if let Some((_, ref mut stored)) = self.pending_rename {
-                *stored = t;
-            }
-        }
-        if let Some(item_id) = self.pending_group_select {
-            self.render_group_selector(ctx, item_id);
-        }
-        if let Some(gid) = self.pending_delete_group {
-            let group_title = group_name(&self.config, gid);
-            let item_count = self
-                .config
-                .items
-                .iter()
-                .filter_map(|i| {
-                    if let LaunchItem::Group(g) = i {
-                        if g.id == gid {
-                            Some(g.items.len())
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                })
-                .next()
-                .unwrap_or(0);
-            let center = ctx.screen_rect().center();
-            egui::Window::new("Confirm Delete")
-                .default_pos(center)
-                .collapsible(false)
-                .resizable(false)
-                .movable(true)
-                .constrain(false)
-                .show(ctx, |ui| {
-                    ui.label(format!("Delete group \"{}\"?", group_title));
-                    ui.label(format!(
-                        "It contains {} item(s). This cannot be undone.",
-                        item_count
-                    ));
-                    ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        if ui.button("Delete").clicked() {
-                            let _ = commands::items::delete_group(&mut self.config, gid);
-                            if self.nav_stack.last() == Some(&gid) {
-                                self.navigate_back();
-                            }
-                            self.mark_dirty();
-                            self.pending_delete_group = None;
-                        }
-                        if ui.button("Cancel").clicked() {
-                            self.pending_delete_group = None;
-                        }
-                    });
-                });
-        }
-        if !self.icon_migration.is_empty() {
-            self.render_icon_migration_dialog(ctx);
-        }
-        if self.show_reorder {
-            self.render_reorder_view(ctx);
-        }
-        let is_dragging = ctx.input(|i| !i.raw.hovered_files.is_empty());
-        if is_dragging {
-            egui::Area::new("drag_overlay".into())
-                .fixed_pos(egui::pos2(0.0, 0.0))
-                .show(ctx, |ui| {
-                    let rect = ui.ctx().screen_rect();
-                    ui.painter().rect_filled(
-                        rect,
-                        egui::CornerRadius::ZERO,
-                        egui::Color32::from_rgba_premultiplied(0x60, 0x62, 0x68, 40),
-                    );
-                    ui.painter().rect_stroke(
-                        rect,
-                        egui::CornerRadius::ZERO,
-                        egui::Stroke::new(3.0_f32, egui::Color32::from_rgb(0x80, 0x82, 0x88)),
-                        egui::StrokeKind::Inside,
-                    );
-                    ui.painter().text(
-                        rect.center(),
-                        egui::Align2::CENTER_CENTER,
-                        "Drop files here to add",
-                        egui::FontId::proportional(18.0),
-                        egui::Color32::WHITE,
-                    );
-                });
-        }
-        // Click-away: close context menu
-        if self.context_menu.is_some()
-            && ctx.input(|i| i.pointer.button_clicked(egui::PointerButton::Primary))
-        {
-            self.context_menu = None;
-        }
-        egui::CentralPanel::default().show(ctx, |ui| {
-            if self.show_first_run_setup {
-                // Render an empty background — the setup dialog floats on top.
-                ui.vertical_centered(|ui| {
-                    ui.add_space(60.0);
-                });
-            } else {
-                ui.horizontal(|ui| {
-                    // Left side: breadcrumb
-                    if ui
-                        .selectable_label(self.is_at_root(), "Launchpad")
-                        .clicked()
-                    {
-                        self.navigate_to_root();
-                    }
-                    for (i, &gid) in self.nav_stack.iter().enumerate() {
-                        ui.label(">");
-                        let (name, color) = group_name_with_icon(&self.config, gid);
-                        let (sq, _) =
-                            ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
-                        ui.painter()
-                            .rect_filled(sq, egui::CornerRadius::same(2), color);
-                        let label = name;
-                        if i == self.nav_stack.len() - 1 {
-                            ui.label(egui::RichText::new(label).strong());
-                        } else {
-                            ui.label(label);
-                        }
-                    }
-                    // Right side: search box
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let search_changed = ui
-                            .add_sized(
-                                egui::vec2(160.0, 20.0),
-                                egui::TextEdit::singleline(&mut self.search_query)
-                                    .hint_text("Search..."),
-                            )
-                            .changed();
-                        if search_changed && !self.search_query.is_empty() {
-                            // Navigate to root so we show results from everywhere
-                            self.nav_stack.clear();
-                        }
-                    });
-                });
-                // Custom subtle divider
-                let div_color = hex_opt(&self.config.resolve_theme().divider_color)
-                    .unwrap_or(egui::Color32::from_rgb(0x3D, 0x3F, 0x43));
-                let div_y = ui.cursor().top();
-                ui.add_space(6.0);
-                let div_rect = egui::Rect::from_min_max(
-                    egui::pos2(ui.min_rect().left() + 12.0, div_y),
-                    egui::pos2(ui.max_rect().right() - 12.0, div_y + 1.0),
-                );
-                ui.painter()
-                    .rect_filled(div_rect, egui::CornerRadius::ZERO, div_color);
-                ui.add_space(6.0);
-                let items: Vec<LaunchItem> = if self.search_query.is_empty() {
-                    self.current_items().to_vec()
-                } else {
-                    self.search_all_items(&self.search_query)
-                };
-                if items.is_empty() {
-                    ui.add_space(60.0);
-                    ui.vertical_centered(|ui| {
-                        if self.search_query.is_empty() {
-                            ui.label(
-                                egui::RichText::new("Empty")
-                                    .color(egui::Color32::from_gray(150))
-                                    .size(16.0),
-                            );
-                            if ui.button("Add Demo Items").clicked() {
-                                self.add_demo_items();
-                            }
-                        } else {
-                            ui.label(
-                                egui::RichText::new("No results")
-                                    .color(egui::Color32::from_gray(150))
-                                    .size(16.0),
-                            );
-                        }
-                    });
-                } else {
-                    self.render_grid(ui, &items);
-                }
-            }
+            EventResult::Propagate
         });
 
-        // First-run setup dialog (floats above the central panel)
-        if self.show_first_run_setup {
-            egui::Window::new("Launchpad Setup")
-                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-                .collapsible(false)
-                .resizable(false)
-                .show(ctx, |ui| self.render_first_run_setup(ui));
-            ctx.request_repaint_after(std::time::Duration::from_millis(100));
-        }
-        // Resize handles — rendered as an overlay so they're always reachable
-        self.render_resize_handles(ctx);
-        self.handle_keyboard(ctx);
-
-        // Window border — frameless window gets a visible outline
-        egui::Area::new("window_border".into())
-            .fixed_pos(egui::pos2(0.0, 0.0))
-            .interactable(false)
-            .show(ctx, |ui| {
-                let r = ui.ctx().screen_rect();
-                ui.painter().rect_stroke(
-                    r,
-                    egui::CornerRadius::same(12),
-                    egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(0x50, 0x52, 0x58)),
-                    egui::StrokeKind::Inside,
-                );
+        w.on_activate(|id| {
+            with_app(|a| a.activate(&id));
+        });
+        w.on_search_changed(|q| {
+            with_app(|a| a.search_changed(q.as_str()));
+        });
+        w.on_go_back(|| {
+            with_app(|a| a.go_back());
+        });
+        w.on_hide_requested(|| {
+            with_app(|a| a.hide_window());
+        });
+        w.on_open_settings(|| {
+            with_app(|a| a.open_settings());
+        });
+        w.on_add_app(|| {
+            with_app(|a| a.pick_paths(false));
+        });
+        w.on_add_folder(|| {
+            with_app(|a| a.pick_paths(true));
+        });
+        w.on_new_group(|| {
+            with_app(|a| {
+                let name = items::unique_group_name(&a.cfg.borrow(), "New Group");
+                a.open_dialog(Dialog::NewGroup, "New group", "Drag items onto a group to add them.", &name);
             });
-
-        // Poll regularly so hotkey/tray events are picked up
-        ctx.request_repaint_after(std::time::Duration::from_millis(100));
-    }
-}
-
-// ─── Resize Handles ──────────────────────────────────────
-impl LaunchpadApp {
-    fn render_resize_handles(&mut self, ctx: &egui::Context) {
-        let sz = 6.0;
-        let rect = ctx.screen_rect();
-        // Safety: if resizing got stuck (e.g. mouse released outside window), reset it
-        if self.resizing.is_some()
-            && !ctx.input(|i| i.pointer.primary_down() || i.pointer.secondary_down())
-        {
-            self.resizing = None;
-            self.resize_start = None;
-        }
-
-        // Right edge strip
-        let r_r = egui::Rect::from_min_max(
-            egui::pos2(rect.right() - sz, rect.top()),
-            egui::pos2(rect.right(), rect.bottom() - sz),
-        );
-        // Bottom edge strip
-        let b_r = egui::Rect::from_min_max(
-            egui::pos2(rect.left(), rect.bottom() - sz),
-            egui::pos2(rect.right() - sz, rect.bottom()),
-        );
-        // Corner
-        let c_r = egui::Rect::from_min_max(
-            egui::pos2(rect.right() - sz, rect.bottom() - sz),
-            egui::pos2(rect.right(), rect.bottom()),
-        );
-
-        for (edge, r) in [
-            (ResizeEdge::Right, r_r),
-            (ResizeEdge::Bottom, b_r),
-            (ResizeEdge::Corner, c_r),
-        ] {
-            let id = egui::Id::new(format!("resize_handle_{:?}", edge));
-            let area = egui::Area::new(id).fixed_pos(r.min).interactable(true);
-            area.show(ctx, |ui| {
-                ui.set_min_size(r.size());
-                let resp = ui.interact(ui.max_rect(), ui.next_auto_id(), egui::Sense::drag());
-                if resp.dragged() {
-                    self.resizing = Some(edge);
-                    self.resize_start = ctx.input(|i| i.pointer.hover_pos());
-                }
-                let hover = resp.hovered() || self.resizing == Some(edge);
-                if hover {
-                    let c = match edge {
-                        ResizeEdge::Corner => egui::CursorIcon::ResizeNwSe,
-                        ResizeEdge::Right => egui::CursorIcon::ResizeEast,
-                        ResizeEdge::Bottom => egui::CursorIcon::ResizeSouth,
-                    };
-                    ui.ctx().set_cursor_icon(c);
-                }
-            });
-        }
-    }
-}
-
-// ─── Title Bar ───────────────────────────────────────────
-impl LaunchpadApp {
-    fn render_title_bar(&mut self, ui: &mut egui::Ui, line_color: egui::Color32) {
-        let h = 32.0;
-        let bounds = egui::Rect::from_min_size(
-            ui.max_rect().left_top(),
-            egui::vec2(ui.max_rect().width(), h),
-        );
-        ui.allocate_space(egui::vec2(ui.available_width(), h));
-        let drag = ui.interact(bounds, ui.next_auto_id(), egui::Sense::drag());
-        if drag.dragged() {
-            ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
-        }
-        let p = ui.painter().clone();
-        // Bottom accent line
-        p.line_segment(
-            [
-                egui::pos2(bounds.left(), bounds.bottom()),
-                egui::pos2(bounds.right(), bounds.bottom()),
-            ],
-            egui::Stroke::new(1.0_f32, line_color),
-        );
-        p.text(
-            bounds.center(),
-            egui::Align2::CENTER_CENTER,
-            "Launchpad",
-            egui::FontId::proportional(13.0),
-            egui::Color32::from_gray(160),
-        );
-        // Fit-to-window button (toggle auto-fit mode)
-        let fr = egui::Rect::from_min_size(
-            egui::pos2(bounds.right() - 132.0, bounds.top() + 4.0),
-            egui::vec2(24.0, 24.0),
-        );
-        if ui.rect_contains_pointer(fr)
-            && ui.input(|i| i.pointer.button_clicked(egui::PointerButton::Primary))
-        {
-            self.auto_fit = !self.auto_fit;
-            log::info!("Auto-fit: {}", self.auto_fit);
-        }
-        let fit_color = if self.auto_fit {
-            egui::Color32::from_rgb(0xF2, 0xC9, 0x4C)
-        } else {
-            egui::Color32::from_gray(180)
-        };
-        draw_fit_icon(&p, fr, fit_color);
-        // Reorder button — draw up/down arrows
-        let rr = egui::Rect::from_min_size(
-            egui::pos2(bounds.right() - 100.0, bounds.top() + 4.0),
-            egui::vec2(24.0, 24.0),
-        );
-        if ui.rect_contains_pointer(rr)
-            && ui.input(|i| i.pointer.button_clicked(egui::PointerButton::Primary))
-        {
-            self.show_reorder = !self.show_reorder;
-        }
-        let reorder_color = if self.show_reorder {
-            egui::Color32::from_rgb(0xF2, 0xC9, 0x4C)
-        } else {
-            egui::Color32::from_gray(180)
-        };
-        draw_updown_arrows(&p, rr, reorder_color);
-        // Settings gear — draw a simple cog
-        let sr = egui::Rect::from_min_size(
-            egui::pos2(bounds.right() - 68.0, bounds.top() + 4.0),
-            egui::vec2(24.0, 24.0),
-        );
-        if ui.rect_contains_pointer(sr)
-            && ui.input(|i| i.pointer.button_clicked(egui::PointerButton::Primary))
-        {
-            self.show_settings = !self.show_settings;
-        }
-        draw_cog(&p, sr, egui::Color32::WHITE);
-        let cr = egui::Rect::from_min_size(
-            egui::pos2(bounds.right() - 36.0, bounds.top() + 4.0),
-            egui::vec2(24.0, 24.0),
-        );
-        let ch = ui.rect_contains_pointer(cr);
-        if ch && ui.input(|i| i.pointer.button_clicked(egui::PointerButton::Primary)) {
-            if self.config.close_to_tray {
-                ui.ctx()
-                    .send_viewport_cmd(egui::ViewportCommand::Minimized(true));
-            } else {
-                self.save_if_dirty();
-                std::process::exit(0);
-            }
-        }
-        let color = if ch {
-            egui::Color32::from_rgb(255, 80, 80)
-        } else {
-            egui::Color32::from_gray(180)
-        };
-        let inset = 6.0;
-        p.line_segment(
-            [
-                cr.left_top() + egui::vec2(inset, inset),
-                cr.right_bottom() - egui::vec2(inset, inset),
-            ],
-            egui::Stroke::new(2.0_f32, color),
-        );
-        p.line_segment(
-            [
-                cr.right_top() + egui::vec2(-inset, inset),
-                cr.left_bottom() + egui::vec2(inset, -inset),
-            ],
-            egui::Stroke::new(2.0_f32, color),
-        );
-    }
-}
-
-// ─── First-Run Setup ─────────────────────────────────────
-
-impl LaunchpadApp {
-    fn render_first_run_setup(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Welcome to Launchpad!");
-        ui.add_space(8.0);
-        ui.label("This looks like your first time running Launchpad.");
-        ui.label("Where should your settings be stored?");
-        ui.add_space(12.0);
-
-        ui.label(egui::RichText::new("Portable mode").size(14.0).strong());
-        ui.label("  config.json is saved next to the executable");
-        ui.label("  Ideal for USB drives or portable use");
-        ui.add_space(8.0);
-
-        ui.label(egui::RichText::new("Normal mode").size(14.0).strong());
-        ui.label("  config.json is saved in your AppData folder");
-        ui.label("  Recommended for installed applications");
-
-        ui.add_space(16.0);
-        ui.horizontal(|ui| {
-            if ui.button("Portable").clicked() {
-                match self.config_manager.finalize_first_run(true) {
-                    Ok(()) => {
-                        let _ = self.config_manager.save(&self.config);
-                        self.show_first_run_setup = false;
-                        log::info!("First-run setup: portable mode chosen");
-                    }
-                    Err(e) => {
-                        log::error!("Portable setup failed: {}", e);
-                        // Try normal mode as fallback
-                        if self.config_manager.finalize_first_run(false).is_ok() {
-                            let _ = self.config_manager.save(&self.config);
-                            self.show_first_run_setup = false;
-                            log::info!("First-run setup: fell back to normal mode");
-                        }
-                    }
-                }
-            }
-            if ui.button("Normal (recommended)").clicked() {
-                if self.config_manager.finalize_first_run(false).is_ok() {
-                    let _ = self.config_manager.save(&self.config);
-                    self.show_first_run_setup = false;
-                    log::info!("First-run setup: normal mode chosen");
-                }
-            }
+        });
+        w.on_menu_action(|action, id| {
+            with_app(|a| a.menu_action(action.as_str(), &id));
+        });
+        w.on_drop_tile(|id, to, into| {
+            with_app(|a| a.drop_tile(&id, to, into));
+        });
+        w.on_dialog_confirm(|text| {
+            with_app(|a| a.dialog_confirm(text.as_str()));
+        });
+        w.on_dialog_cancel(|| {
+            with_app(|a| a.dialog_cancel());
+        });
+        w.on_dialog_alt(|| {
+            with_app(|a| a.dialog_alt());
+        });
+        w.on_move_to(|gid| {
+            with_app(|a| a.move_to(&gid));
+        });
+        w.on_first_run_choice(|portable| {
+            with_app(|a| a.first_run_choice(portable));
+        });
+        w.on_status_clicked(|| {
+            with_app(|a| a.status_clicked());
+        });
+        w.on_dismiss_status(|| {
+            with_app(|a| a.clear_status());
+        });
+        w.on_fit_icon_size(|width, height, count| {
+            let gap = with_app(|a| a.cfg.borrow().grid_spacing).unwrap_or(12.0);
+            ui::fit_icon_size(width, height, count.max(0) as usize, gap)
         });
     }
-}
 
-// ─── Settings ────────────────────────────────────────────
-impl LaunchpadApp {
-    fn render_settings(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Settings");
-        ui.separator();
-
-        // ── General ──
-        ui.collapsing("General", |ui| {
-            ui.label("Grid Spacing");
-            if ui
-                .add(egui::Slider::new(&mut self.config.grid_spacing, 2.0..=24.0).text("px"))
-                .changed()
-            {
-                self.mark_dirty();
+    fn init_tray(&self) {
+        let label = hotkey::label(&self.cfg.borrow().hotkey);
+        match Tray::new(&label, |cmd| {
+            with_app(|a| match cmd {
+                TrayCommand::Toggle => a.toggle_window(),
+                TrayCommand::Settings => a.open_settings(),
+                TrayCommand::Quit => a.quit(),
+            });
+        }) {
+            Ok(t) => *self.tray.borrow_mut() = Some(t),
+            Err(e) => {
+                log::error!("tray icon unavailable: {e}");
+                self.show_window();
             }
-            ui.label("Icon Size");
-            if ui
-                .add(egui::Slider::new(&mut self.config.grid_icon_size, 24.0..=72.0).text("px"))
-                .changed()
-            {
-                self.auto_fit = false;
-                self.mark_dirty();
-            }
-            ui.separator();
-            if ui
-                .checkbox(
-                    &mut self.config.hide_on_launch,
-                    "Hide Launchpad on app launch",
-                )
-                .changed()
-            {
-                self.mark_dirty();
-            }
-            ui.label("Minimizes after opening an app or folder.");
-            ui.separator();
-            if ui
-                .checkbox(&mut self.config.close_to_tray, "Close to system tray")
-                .changed()
-            {
-                self.mark_dirty();
-            }
-            ui.label("X button hides instead of quitting. Use tray menu to exit.");
-            ui.separator();
-            if ui
-                .checkbox(&mut self.config.auto_start, "Start with Windows")
-                .changed()
-            {
-                self.mark_dirty();
-                crate::platform::autostart::set_auto_start(self.config.auto_start);
-            }
-            ui.label("Launchpad will start automatically when you log in.");
-            ui.separator();
-            ui.label("Global Hotkey");
-            ui.label("Format: Ctrl+Alt+R, Ctrl+Shift+F, etc.");
-            let mut hk = self.pending_hotkey.clone();
-            let resp = ui.text_edit_singleline(&mut hk);
-            if resp.changed() {
-                self.pending_hotkey = hk.clone();
-            }
-            // Sync from config when user isn't editing
-            if !resp.has_focus() && self.pending_hotkey != self.config.hotkey {
-                self.pending_hotkey = self.config.hotkey.clone();
-            }
-            // Validate and save only when a valid hotkey is present and differs from config
-            if hk != self.config.hotkey {
-                if hotkey::parse_hotkey(&hk).is_some() {
-                    self.config.hotkey = hk.clone();
-                    self.mark_dirty();
-                    ui.label(
-                        egui::RichText::new("Valid — restart to apply")
-                            .color(egui::Color32::from_rgb(100, 200, 100)),
-                    );
-                } else if !hk.is_empty() {
-                    ui.label(
-                        egui::RichText::new("Invalid hotkey format")
-                            .color(egui::Color32::from_rgb(255, 100, 100)),
-                    );
-                }
-            }
-            ui.add_space(4.0);
-            if ui
-                .checkbox(&mut self.config.hotkey_on_release, "Trigger on key release")
-                .changed()
-            {
-                self.mark_dirty();
-            }
-            ui.label("When off, triggers on key press instead.");
-            ui.add_space(2.0);
-            ui.label(
-                egui::RichText::new("Restart required for hotkey changes to take effect.")
-                    .color(egui::Color32::from_rgb(255, 100, 100))
-                    .size(11.0),
-            );
-        });
-
-        // ── Themes ──
-        ui.collapsing("Themes", |ui| {
-            let current = self.config.selected_theme.clone();
-            ui.label("Select a theme:");
-            ui.add_space(4.0);
-            // "None" option for defaults
-            let none_label = "Default";
-            let is_none = current.is_none();
-            if ui.selectable_label(is_none, none_label).clicked() {
-                self.config.selected_theme = None;
-                self.auto_fit = false;
-                self.mark_dirty();
-            }
-            for theme in &self.config.themes.clone() {
-                let is_sel = current.as_deref() == Some(&theme.name);
-                // Show a small color preview
-                let preview = if theme.header_color.is_some() {
-                    format!("  ■ {}", theme.name)
-                } else {
-                    theme.name.clone()
-                };
-                if ui.selectable_label(is_sel, preview).clicked() {
-                    self.config.selected_theme = Some(theme.name.clone());
-                    self.auto_fit = false;
-                    self.mark_dirty();
-                }
-            }
-            // Color swatches for the selected theme
-            if let Some(ref name) = current {
-                let t = self.config.resolve_theme();
-                ui.add_space(8.0);
-                ui.label(format!("Preview: {}", name));
-                ui.horizontal(|ui| {
-                    if let Some(ref h) = t.header_color {
-                        swatch(ui, "H", h);
-                    }
-                    if let Some(ref b) = t.body_color {
-                        swatch(ui, "B", b);
-                    }
-                    if let Some(ref w) = t.widget_color {
-                        swatch(ui, "W", w);
-                    }
-                    if let Some(ref s) = t.selection_color {
-                        swatch(ui, "S", s);
-                    }
-                });
-            }
-        });
-
-        ui.add_space(16.0);
-        if ui.button("Close").clicked() {
-            self.show_settings = false;
         }
     }
-}
 
-// ─── Context Menu ───────────────────────────────────────
-impl LaunchpadApp {
-    fn render_context_menu(&mut self, ctx: &egui::Context, state: &ContextMenuState) {
-        let items: Vec<LaunchItem> = self.current_items().to_vec();
-        let item = match items.get(state.item_index) {
-            Some(i) => i.clone(),
-            None => {
-                self.context_menu = None;
-                return;
+    // ── Window lifecycle ───────────────────────────────────────────────────────
+
+    pub fn show_window(&self) {
+        let w = self.window.window();
+        if !self.geometry_restored.get() {
+            let cfg = self.cfg.borrow();
+            if let (Some(width), Some(height)) = (cfg.window_width, cfg.window_height) {
+                if width >= 300.0 && height >= 240.0 {
+                    w.set_size(slint::LogicalSize::new(width, height));
+                }
             }
-        };
-        let id = item.id();
-        let is_group = matches!(&item, LaunchItem::Group(_));
-        let has_custom = self.has_custom_icon(id);
-        egui::Window::new("context_menu")
-            .title_bar(false)
-            .resizable(false)
-            .fixed_pos(state.pos)
-            .default_width(150.0)
-            .show(ctx, |ui| {
-                ui.set_min_width(140.0);
-                ui.style_mut().spacing.button_padding = egui::vec2(8.0, 4.0);
-                let ol = match &item {
-                    LaunchItem::Folder(_) => "Open Folder",
-                    _ => "Open",
-                };
-                if ui.button(ol).clicked() {
-                    self.activate_item(&item);
-                    self.context_menu = None;
-                }
-                ui.separator();
-                if ui.button("Rename").clicked() {
-                    self.pending_rename = Some((id, item.title().to_string()));
-                    self.context_menu = None;
-                }
-                if ui.button("Change Icon").clicked() {
-                    if let Some(path) = rfd::FileDialog::new()
-                        .add_filter("Images", &["png", "ico", "jpg", "bmp"])
-                        .pick_file()
-                    {
-                        // Copy the icon to the local icons folder
-                        let icons_dir = self.config_manager.icons_dir();
-                        let _ = std::fs::create_dir_all(&icons_dir);
-                        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("png");
-                        let dest = icons_dir.join(format!("{}.{}", uuid::Uuid::new_v4(), ext));
-                        if std::fs::copy(&path, &dest).is_ok() {
-                            // Store just the filename, not the full path
-                            let filename = dest.file_name().map(PathBuf::from).unwrap_or_default();
-                            let _ = commands::items::set_icon(&mut self.config, id, filename);
-                            self.mark_dirty();
-                        } else {
-                            log::error!(
-                                "Failed to copy icon from {} to {}",
-                                path.display(),
-                                dest.display()
-                            );
-                        }
-                    }
-                    self.context_menu = None;
-                }
-                if has_custom {
-                    if ui.button("Remove Icon").clicked() {
-                        let _ = commands::items::clear_icon(&mut self.config, id);
-                        self.mark_dirty();
-                        self.context_menu = None;
-                    }
-                }
-                if !is_group {
-                    if ui.button("Add to Group").clicked() {
-                        self.pending_group_select = Some(id);
-                        self.context_menu = None;
-                    }
-                    if !self.is_at_root() {
-                        if ui.button("Remove from Group").clicked() {
-                            let item_data = item.clone();
-                            let _ = commands::items::remove_item(&mut self.config, id);
-                            match item_data {
-                                LaunchItem::App(a) => {
-                                    commands::items::add_app(
-                                        &mut self.config,
-                                        a.title.clone(),
-                                        a.executable_path.clone(),
-                                    );
-                                }
-                                LaunchItem::Folder(f) => {
-                                    commands::items::add_folder(
-                                        &mut self.config,
-                                        f.title.clone(),
-                                        f.folder_path.clone(),
-                                    );
-                                }
-                                _ => {}
-                            }
-                            self.mark_dirty();
-                            self.context_menu = None;
-                        }
-                    }
-                }
-                ui.separator();
-                let label = if is_group { "Delete Group" } else { "Remove" };
-                if ui.button(label).clicked() {
-                    if is_group {
-                        // Check if group has items — if so, ask for confirmation
-                        let has_items = self.config.items.iter().any(|i| {
-                            if let LaunchItem::Group(g) = i {
-                                g.id == id && !g.items.is_empty()
-                            } else {
-                                false
-                            }
-                        });
-                        if has_items {
-                            self.pending_delete_group = Some(id);
-                        } else {
-                            let _ = commands::items::delete_group(&mut self.config, id);
-                            if self.nav_stack.last() == Some(&id) {
-                                self.navigate_back();
-                            }
-                            self.mark_dirty();
-                        }
-                    } else {
-                        let _ = commands::items::remove_item(&mut self.config, id);
-                        self.mark_dirty();
-                    }
-                    self.context_menu = None;
-                }
-            });
-    }
-    fn render_group_selector(&mut self, ctx: &egui::Context, item_id: ItemId) {
-        let groups: Vec<(ItemId, String)> = self
-            .config
-            .items
-            .iter()
-            .filter_map(|item| {
-                if let LaunchItem::Group(g) = item {
-                    Some((g.id, g.title.clone()))
-                } else {
-                    None
-                }
-            })
-            .collect();
-        let center = ctx.screen_rect().center();
-        egui::Window::new("Select Group")
-            .default_pos(center)
-            .collapsible(false)
-            .resizable(false)
-            .movable(true)
-            .constrain(false)
-            .show(ctx, |ui| {
-                ui.label("Choose a group:");
-                ui.separator();
-                for (gid, name) in &groups {
-                    if ui.button(name).clicked() {
-                        let _ = commands::items::move_to_group(&mut self.config, item_id, *gid);
-                        self.mark_dirty();
-                        self.pending_group_select = None;
-                    }
-                }
-                ui.separator();
-                if ui.button("+ Create New Group").clicked() {
-                    let name = unique_name(
-                        "New Group",
-                        &groups.iter().map(|(_, n)| n.clone()).collect::<Vec<_>>(),
-                    );
-                    let gid = commands::items::add_group(&mut self.config, name);
-                    let _ = commands::items::move_to_group(&mut self.config, item_id, gid);
-                    self.mark_dirty();
-                    self.pending_group_select = None;
-                }
-                ui.add_space(8.0);
-                if ui.button("Cancel").clicked() {
-                    self.pending_group_select = None;
-                }
-            });
-    }
-}
+            if let (Some(x), Some(y)) = (cfg.window_x, cfg.window_y) {
+                w.set_position(slint::LogicalPosition::new(x, y));
+            }
+        }
+        // Re-check missing targets each time the launcher opens.
+        self.missing.borrow_mut().clear();
+        self.refresh();
 
-// ─── Grid ────────────────────────────────────────────────
-impl LaunchpadApp {
-    fn render_grid(&mut self, ui: &mut egui::Ui, items: &[LaunchItem]) {
-        let theme = self.config.resolve_theme();
-        let sp = theme.grid_spacing.unwrap_or(self.config.grid_spacing);
-        // Auto-fit: compute optimal size every frame when enabled
-        let isz = if self.auto_fit {
-            compute_fit_icon_size(items.len(), sp, ui.available_width(), ui.available_height())
-        } else {
-            theme.grid_icon_size.unwrap_or(self.config.grid_icon_size)
-        };
-        let iw = isz + 48.0;
-        let ih = isz + 28.0;
-        let tw = ui.available_width();
-        let cw = iw + sp;
-        let cols = ((tw + sp) / cw).floor() as usize;
-        if cols == 0 {
+        if let Err(e) = self.window.show() {
+            log::error!("cannot show window: {e}");
             return;
         }
-        let ox = ((tw - (cols as f32 * cw - sp)) / 2.0).max(0.0);
-        for row_start in (0..items.len()).step_by(cols) {
-            let row_end = (row_start + cols).min(items.len());
-            let row_top = ui.cursor().top();
-            let p = ui.painter().clone();
-            for col in 0..(row_end - row_start) {
-                let idx = row_start + col;
-                let item = &items[idx];
-                let x = ox + col as f32 * cw;
-                let rect = egui::Rect::from_min_size(
-                    egui::pos2(ui.min_rect().left() + x, row_top),
-                    egui::vec2(iw, ih),
-                );
-                let is_sel = self.selected_index == Some(idx);
-                let resp = ui.allocate_rect(rect, egui::Sense::click());
-                let hovered = resp.hovered();
-                let bg = if is_sel {
-                    egui::Color32::from_rgba_premultiplied(0x60, 0x62, 0x68, 180)
-                } else if hovered {
-                    egui::Color32::from_rgba_premultiplied(0x48, 0x4A, 0x50, 120)
-                } else {
-                    egui::Color32::TRANSPARENT
-                };
-                p.rect_filled(rect, egui::CornerRadius::same(8), bg);
-                if is_sel {
-                    p.rect_stroke(
-                        rect,
-                        egui::CornerRadius::same(8),
-                        egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(0x80, 0x82, 0x88)),
-                        egui::StrokeKind::Inside,
-                    );
-                }
-                let icon_key = IconCache::key_for(item, isz as u32);
-                if let Some(tex) = self.icon_cache.get_or_load(icon_key, ui.ctx()) {
-                    let ir = egui::Rect::from_center_size(
-                        rect.center() - egui::vec2(0.0, 4.0),
-                        egui::vec2(isz, isz),
-                    );
-                    p.image(
-                        tex.id(),
-                        ir,
-                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                        egui::Color32::WHITE,
-                    );
-                }
-                let title = item.title();
-                let display = if title.len() > 12 {
-                    format!("{}…", &title[..11])
-                } else {
-                    title.to_string()
-                };
-                p.text(
-                    egui::pos2(rect.center().x, rect.center().y + isz / 2.0 + 2.0),
-                    egui::Align2::CENTER_TOP,
-                    &display,
-                    egui::FontId::proportional(11.0),
-                    egui::Color32::from_gray(220),
-                );
-                if resp.clicked() {
-                    self.selected_index = Some(idx);
-                    self.activate_item(item);
-                }
-                if resp.clicked_by(egui::PointerButton::Secondary) {
-                    self.selected_index = Some(idx);
-                    let pos = ui
-                        .ctx()
-                        .input(|i| i.pointer.hover_pos().unwrap_or(rect.center()));
-                    self.context_menu = Some(ContextMenuState {
-                        item_index: idx,
-                        pos,
-                    });
-                }
+        let dark = theme::current(&self.cfg.borrow()).dark;
+        let first = !self.geometry_restored.get();
+        w.with_winit_window(|ww| {
+            ui::apply_native_chrome(ww, dark);
+            if first {
+                keep_on_screen(ww);
             }
-            ui.allocate_space(egui::vec2(tw, sp));
-        }
+            ww.set_minimized(false);
+            ww.focus_window();
+        });
+        self.geometry_restored.set(true);
+        self.window.invoke_focus_search();
+        self.apply_chrome_soon();
     }
 
-    /// Get mutable reference to items at the current nav level.
-    fn current_items_mut(&mut self) -> &mut Vec<LaunchItem> {
-        let gid = self.nav_stack.last().copied();
-        if let Some(gid) = gid {
-            for i in 0..self.config.items.len() {
-                if let LaunchItem::Group(ref g) = self.config.items[i] {
-                    if g.id == gid {
-                        let ptr: *mut LaunchItem = &mut self.config.items[i];
-                        return unsafe { &mut (*ptr).as_group_mut().unwrap().items };
-                    }
-                }
-            }
-        }
-        &mut self.config.items
-    }
-
-    fn render_reorder_view(&mut self, ctx: &egui::Context) {
-        let items: Vec<LaunchItem> = self.current_items().to_vec();
-        let center = ctx.screen_rect().center();
-        egui::Window::new("Reorder Items")
-            .default_pos(center)
-            .collapsible(false)
-            .resizable(false)
-            .movable(true)
-            .constrain(false)
-            .default_width(320.0)
-            .show(ctx, |ui| {
-                ui.label(if self.is_at_root() {
-                    "Reorder items — Home"
-                } else {
-                    "Reorder items — Group"
-                });
-                ui.separator();
-                egui::ScrollArea::vertical()
-                    .max_height(400.0)
-                    .show(ui, |ui| {
-                        for i in 0..items.len() {
-                            let item = &items[i];
-                            let (icon_text, icon_color) = match item {
-                                LaunchItem::App(_) => {
-                                    ("A", egui::Color32::from_rgb(0x60, 0x62, 0x68))
-                                }
-                                LaunchItem::Group(_) => {
-                                    ("G", egui::Color32::from_rgb(0xF2, 0xC9, 0x4C))
-                                }
-                                LaunchItem::Folder(_) => {
-                                    ("F", egui::Color32::from_rgb(0x64, 0xB4, 0xFF))
-                                }
-                            };
-                            ui.horizontal(|ui| {
-                                // Draw a small colored label as icon indicator
-                                let (icon_rect, _) = ui.allocate_exact_size(
-                                    egui::vec2(18.0, 18.0),
-                                    egui::Sense::hover(),
-                                );
-                                ui.painter().rect_filled(
-                                    icon_rect,
-                                    egui::CornerRadius::same(3),
-                                    icon_color,
-                                );
-                                ui.painter().text(
-                                    icon_rect.center(),
-                                    egui::Align2::CENTER_CENTER,
-                                    icon_text,
-                                    egui::FontId::proportional(10.0),
-                                    egui::Color32::WHITE,
-                                );
-                                ui.label(item.title());
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        if i > 0 {
-                                            let b = egui::Button::new("");
-                                            let resp = ui.add_sized(egui::vec2(24.0, 20.0), b);
-                                            draw_triangle(ui, resp.rect, true);
-                                            if resp.clicked() {
-                                                self.swap_items(i, i - 1);
-                                            }
-                                        }
-                                        if i < items.len() - 1 {
-                                            let b = egui::Button::new("");
-                                            let resp = ui.add_sized(egui::vec2(24.0, 20.0), b);
-                                            draw_triangle(ui, resp.rect, false);
-                                            if resp.clicked() {
-                                                self.swap_items(i, i + 1);
-                                            }
-                                        }
-                                    },
-                                );
-                            });
-                        }
-                    });
-                ui.add_space(8.0);
-                if ui.button("Close").clicked() {
-                    self.show_reorder = false;
+    /// A window that's shown for the first time has no native window until the event
+    /// loop runs, so title-bar theme / icons are applied again on the next tick.
+    fn apply_chrome_soon(&self) {
+        slint::Timer::single_shot(Duration::from_millis(30), || {
+            with_app(|a| {
+                let dark = theme::current(&a.cfg.borrow()).dark;
+                a.window.window().with_winit_window(|ww| ui::apply_native_chrome(ww, dark));
+                if let Some(s) = a.settings.borrow().as_ref() {
+                    s.window().with_winit_window(|ww| ui::apply_native_chrome(ww, dark));
                 }
             });
+        });
     }
 
-    fn swap_items(&mut self, a: usize, b: usize) {
-        let items = self.current_items_mut();
-        if a < items.len() && b < items.len() {
-            items.swap(a, b);
-            self.mark_dirty();
+    fn hide_window(&self) {
+        self.remember_geometry();
+        self.schedule_save();
+        let _ = self.window.hide();
+    }
+
+    fn toggle_window(&self) {
+        let w = self.window.window();
+        if !w.is_visible() {
+            self.show_window();
+            return;
+        }
+        let state = w.with_winit_window(|ww| (ww.has_focus(), ww.is_minimized().unwrap_or(false)));
+        match state {
+            Some((true, false)) => self.hide_window(),
+            _ => self.show_window(),
         }
     }
 
-    /// Search all items recursively (root + all groups) matching the query.
-    fn search_all_items(&self, query: &str) -> Vec<LaunchItem> {
-        let q = query.to_lowercase();
-        let mut results = Vec::new();
-        fn collect(items: &[LaunchItem], q: &str, out: &mut Vec<LaunchItem>) {
-            for item in items {
-                if item.title().to_lowercase().contains(q) {
-                    out.push(item.clone());
+    fn quit(&self) {
+        self.remember_geometry();
+        self.save_now();
+        let _ = slint::quit_event_loop();
+    }
+
+    /// Copy the window's logical geometry into the config.
+    fn remember_geometry(&self) {
+        let w = self.window.window();
+        if !self.geometry_restored.get() || !w.is_visible() {
+            return;
+        }
+        if w.with_winit_window(|ww| ww.is_minimized().unwrap_or(false)).unwrap_or(false) {
+            return;
+        }
+        let scale = w.scale_factor();
+        let pos = w.position().to_logical(scale);
+        let size = w.size().to_logical(scale);
+        let mut cfg = self.cfg.borrow_mut();
+        cfg.window_x = Some(pos.x);
+        cfg.window_y = Some(pos.y);
+        cfg.window_width = Some(size.width);
+        cfg.window_height = Some(size.height);
+        self.geometry_dirty.set(false);
+    }
+
+    // ── Persistence ────────────────────────────────────────────────────────────
+
+    fn schedule_save(&self) {
+        self.save_timer.start(slint::TimerMode::SingleShot, SAVE_DELAY, || {
+            with_app(|a| {
+                if a.geometry_dirty.get() {
+                    a.remember_geometry();
                 }
-                if let LaunchItem::Group(g) = item {
-                    collect(&g.items, q, out);
+                a.save_now();
+            });
+        });
+    }
+
+    fn save_now(&self) {
+        self.save_timer.stop();
+        if let Err(e) = self.store.borrow().save(&self.cfg.borrow()) {
+            log::error!("save: {e}");
+            self.set_status(&format!("Couldn't save settings: {e}"), true, StatusAction::None);
+        }
+    }
+
+    /// Mutate the config, then save and redraw.
+    fn edit(&self, f: impl FnOnce(&mut Config)) {
+        f(&mut self.cfg.borrow_mut());
+        self.schedule_save();
+        self.refresh();
+    }
+
+    // ── Content ────────────────────────────────────────────────────────────────
+
+    fn schedule_refresh(&self) {
+        if self.refresh_pending.replace(true) {
+            return;
+        }
+        slint::Timer::single_shot(Duration::from_millis(16), || {
+            with_app(|a| {
+                a.refresh_pending.set(false);
+                a.refresh();
+            });
+        });
+    }
+
+    /// Rebuild the tiles for the current group / search.
+    fn refresh(&self) {
+        let cfg = self.cfg.borrow();
+        if let Some(gid) = self.nav.get() {
+            if items::find_group(&cfg, gid).is_none() {
+                self.nav.set(None);
+            }
+        }
+        let nav = self.nav.get();
+        let query = self.query.borrow().clone();
+        let searching = !query.trim().is_empty();
+
+        let entries: Vec<(LaunchItem, Parent)> = if searching {
+            items::search(&cfg, &query)
+        } else {
+            items::list(&cfg, nav).map(|l| l.iter().map(|i| (i.clone(), nav)).collect()).unwrap_or_default()
+        };
+        let tiles: Vec<Tile> =
+            entries.iter().map(|(item, parent)| self.make_tile(&cfg, item, *parent, searching)).collect();
+
+        let w = &self.window;
+        let count = |n: usize, one: &str, many: &str| if n == 1 { format!("1 {one}") } else { format!("{n} {many}") };
+        if searching {
+            w.set_heading("Search".into());
+            w.set_subheading(count(tiles.len(), "result", "results").into());
+        } else if let Some(g) = nav.and_then(|gid| items::find_group(&cfg, gid)) {
+            w.set_heading(g.title.as_str().into());
+            w.set_subheading(format!("Group · {}", count(g.items.len(), "item", "items")).into());
+        } else {
+            w.set_heading("Launchpad".into());
+            w.set_subheading(if tiles.is_empty() {
+                SharedString::new()
+            } else {
+                count(tiles.len(), "item", "items").into()
+            });
+        }
+        w.set_in_group(nav.is_some() && !searching);
+        let target = nav.and_then(|gid| items::find_group(&cfg, gid)).map_or("Home".to_owned(), |g| g.title.clone());
+        w.set_drop_target_name(target.into());
+        drop(cfg);
+
+        // Update rows in place when the count is unchanged, so an icon arriving
+        // mid-drag doesn't rebuild (and drop) the tile under the pointer.
+        if self.tiles.row_count() == tiles.len() {
+            for (i, t) in tiles.into_iter().enumerate() {
+                if self.tiles.row_data(i).as_ref() != Some(&t) {
+                    self.tiles.set_row_data(i, t);
+                }
+            }
+        } else {
+            self.tiles.set_vec(tiles);
+        }
+        let sel = w.get_selected();
+        if sel >= self.tiles.row_count() as i32 {
+            w.set_selected(self.tiles.row_count() as i32 - 1);
+        }
+    }
+
+    fn make_tile(&self, cfg: &Config, item: &LaunchItem, parent: Parent, searching: bool) -> Tile {
+        let title = item.title();
+        let kind = match item {
+            LaunchItem::App(_) => 0,
+            LaunchItem::Group(_) => 1,
+            LaunchItem::Folder(_) => 2,
+        };
+        let target = target_of(item);
+        let icon = self.icon_for(item);
+        let (previews, count) = match item {
+            LaunchItem::Group(g) => {
+                let imgs: Vec<slint::Image> = g.items.iter().filter_map(|i| self.icon_for(i)).take(4).collect();
+                (ModelRc::new(VecModel::from(imgs)), g.items.len() as i32)
+            }
+            _ => (ModelRc::default(), 0),
+        };
+        let location = match (searching, parent) {
+            (true, Some(gid)) => items::find_group(cfg, gid).map(|g| g.title.clone()).unwrap_or_default(),
+            _ => String::new(),
+        };
+        Tile {
+            id: item.id().to_string().into(),
+            kind,
+            title: title.into(),
+            location: location.into(),
+            in_group: parent.is_some(),
+            has_icon: icon.is_some(),
+            icon: icon.unwrap_or_default(),
+            custom_icon: items::icon_path(item).is_some(),
+            initial: ui::initial_for(title).into(),
+            tint: ui::tint_for(title),
+            previews,
+            count,
+            missing: target.is_some_and(|p| self.is_missing(&p)),
+        }
+    }
+
+    fn is_missing(&self, path: &Path) -> bool {
+        *self.missing.borrow_mut().entry(path.to_path_buf()).or_insert_with(|| !path.exists())
+    }
+
+    // ── Icons ──────────────────────────────────────────────────────────────────
+
+    /// The item's icon if it's loaded; otherwise queue it (a refresh follows) and
+    /// return `None` so the tile shows its letter for now.
+    fn icon_for(&self, item: &LaunchItem) -> Option<slint::Image> {
+        let custom = items::icon_path(item).map(|p| IconSource::File(self.store.borrow().resolve_icon(p)));
+        let shell = target_of(item).map(IconSource::Shell);
+        for source in custom.into_iter().chain(shell) {
+            match self.icons.borrow().get(&source) {
+                Some(Some(img)) => return Some(img.clone()),
+                Some(None) => continue, // failed: fall back to the next source
+                None => {}
+            }
+            if self.pending_icons.borrow_mut().insert(source.clone()) {
+                let _ = self.icon_tx.send(source);
+            }
+            return None;
+        }
+        None
+    }
+
+    fn icon_ready(&self, source: IconSource, icon: Option<Rgba>) {
+        let done = {
+            let mut pending = self.pending_icons.borrow_mut();
+            pending.remove(&source);
+            pending.is_empty()
+        };
+        if done {
+            log::debug!("icons loaded ({} cached) after {:?}", self.icons.borrow().len() + 1, self.started.elapsed());
+        }
+        let img = icon.map(|i| ui::image_from_rgba(i.width, i.height, &i.pixels));
+        self.icons.borrow_mut().insert(source, img);
+        self.schedule_refresh();
+    }
+
+    fn forget_icon(&self, source: &IconSource) {
+        self.icons.borrow_mut().remove(source);
+    }
+
+    // ── Navigation & activation ────────────────────────────────────────────────
+
+    fn activate(&self, id: &str) {
+        let Some(id) = parse_id(id) else { return };
+        let item = items::find(&self.cfg.borrow(), id).map(|(i, _)| i.clone());
+        let Some(item) = item else { return };
+        let target = match &item {
+            LaunchItem::Group(g) => {
+                self.enter_group(g.id);
+                return;
+            }
+            LaunchItem::App(_) | LaunchItem::Folder(_) => target_of(&item).unwrap_or_default(),
+        };
+        shell::open(target, |msg| on_ui(move |a| a.set_status(&msg, true, StatusAction::None)));
+        if self.cfg.borrow().hide_on_launch {
+            self.clear_search();
+            self.hide_window();
+        }
+    }
+
+    fn enter_group(&self, gid: ItemId) {
+        self.forward.set(None);
+        self.nav.set(Some(gid));
+        self.clear_search();
+        self.window.set_selected(-1);
+        self.refresh();
+    }
+
+    fn go_back(&self) {
+        let from = self.nav.take();
+        self.forward.set(from);
+        self.refresh();
+        // Select the group we just left, so Enter goes straight back in.
+        let idx = from.and_then(|gid| self.cfg.borrow().items.iter().position(|i| i.id() == gid));
+        self.window.set_selected(idx.map_or(-1, |i| i as i32));
+    }
+
+    /// Mouse Back: clear a search first, then leave the group.
+    fn nav_back(&self) {
+        if self.dialog.get() != Dialog::None {
+            return;
+        }
+        if !self.query.borrow().trim().is_empty() {
+            self.clear_search();
+            self.search_changed("");
+        } else if self.nav.get().is_some() {
+            self.go_back();
+        }
+    }
+
+    /// Mouse Forward: back into the group that Back just left.
+    fn nav_forward(&self) {
+        if self.dialog.get() != Dialog::None || self.nav.get().is_some() {
+            return;
+        }
+        if let Some(gid) = self.forward.get() {
+            if items::find_group(&self.cfg.borrow(), gid).is_some() {
+                self.enter_group(gid);
+            }
+        }
+    }
+
+    fn clear_search(&self) {
+        self.query.borrow_mut().clear();
+        self.window.set_query(SharedString::new());
+    }
+
+    fn search_changed(&self, q: &str) {
+        *self.query.borrow_mut() = q.to_owned();
+        self.refresh();
+        let has_results = self.tiles.row_count() > 0;
+        self.window.set_selected(if !q.trim().is_empty() && has_results { 0 } else { -1 });
+    }
+
+    // ── Item actions ───────────────────────────────────────────────────────────
+
+    fn menu_action(&self, action: &str, id: &str) {
+        let Some(id) = parse_id(id) else { return };
+        let found = items::find(&self.cfg.borrow(), id).map(|(i, p)| (i.clone(), p));
+        let Some((item, parent)) = found else { return };
+        match action {
+            "open" => self.activate(&id.to_string()),
+            "reveal" => {
+                if let Some(p) = target_of(&item) {
+                    shell::reveal(&p);
+                }
+            }
+            "rename" => self.open_dialog(Dialog::Rename(id), "Rename", "", item.title()),
+            "icon" => self.pick_icon(id),
+            "reset-icon" => {
+                if let Some(p) = items::icon_path(&item) {
+                    self.forget_icon(&IconSource::File(self.store.borrow().resolve_icon(p)));
+                }
+                self.edit(|c| {
+                    let _ = items::set_icon(c, id, None);
+                });
+            }
+            "move" => {
+                if matches!(item, LaunchItem::Group(_)) {
+                    return;
+                }
+                let choices: Vec<GroupChoice> = {
+                    let cfg = self.cfg.borrow();
+                    items::groups(&cfg)
+                        .into_iter()
+                        .map(|(gid, title)| GroupChoice {
+                            id: gid.to_string().into(),
+                            title: title.into(),
+                            count: items::find_group(&cfg, gid).map_or(0, |g| g.items.len() as i32),
+                            current: parent == Some(gid),
+                        })
+                        .collect()
+                };
+                self.group_choices.set_vec(choices);
+                self.open_dialog(Dialog::Move(id), &format!("Move “{}” to a group", item.title()), "", "");
+            }
+            "move-out" => {
+                self.edit(|c| {
+                    let _ = items::move_to_root(c, id);
+                });
+                self.set_status(&format!("Moved {} to Home", item.title()), false, StatusAction::None);
+            }
+            "ungroup" => self.ungroup(id),
+            "remove" => match &item {
+                LaunchItem::Group(g) if !g.items.is_empty() => {
+                    let n = g.items.len();
+                    let msg = format!(
+                        "It holds {} — they'll be removed from Launchpad too. Choose Ungroup to keep them.",
+                        if n == 1 { "1 item".to_owned() } else { format!("{n} items") }
+                    );
+                    self.open_dialog(Dialog::DeleteGroup(id), &format!("Delete “{}”?", g.title), &msg, "");
+                }
+                _ => self.remove_with_undo(id, item.title()),
+            },
+            _ => log::warn!("unknown menu action {action}"),
+        }
+    }
+
+    fn remove_with_undo(&self, id: ItemId, title: &str) {
+        let snapshot = self.cfg.borrow().items.clone();
+        self.edit(|c| {
+            let _ = items::remove_item(c, id);
+        });
+        *self.undo.borrow_mut() = Some(snapshot);
+        self.set_status(&format!("Removed {title}"), false, StatusAction::Undo);
+    }
+
+    fn ungroup(&self, gid: ItemId) {
+        if self.nav.get() == Some(gid) {
+            self.nav.set(None);
+        }
+        self.edit(|c| {
+            let _ = items::ungroup(c, gid);
+        });
+    }
+
+    /// A tile was dragged within the grid.
+    fn drop_tile(&self, id: &str, to: i32, into: bool) {
+        let Some(id) = parse_id(id) else { return };
+        if !self.query.borrow().trim().is_empty() || to < 0 {
+            return;
+        }
+        let nav = self.nav.get();
+        let (from, target) = {
+            let cfg = self.cfg.borrow();
+            let Some(list) = items::list(&cfg, nav) else { return };
+            let Some(from) = list.iter().position(|i| i.id() == id) else { return };
+            (from, list.get(to as usize).cloned())
+        };
+        if into {
+            if let Some(LaunchItem::Group(g)) = target {
+                let mut result = Ok(());
+                self.edit(|c| result = items::move_to_group(c, id, g.id));
+                match result {
+                    Ok(()) => self.set_status(&format!("Moved to {}", g.title), false, StatusAction::None),
+                    Err(e) => self.set_status(&e, true, StatusAction::None),
+                }
+                self.window.set_selected(-1);
+            }
+            return;
+        }
+        self.edit(|c| {
+            let _ = items::reorder(c, nav, from, to as usize);
+        });
+        self.window.set_selected(to);
+    }
+
+    // ── Adding ─────────────────────────────────────────────────────────────────
+
+    fn set_files_hovering(&self, on: bool) {
+        self.window.set_files_hovering(on);
+    }
+
+    /// Explorer delivers one event per dropped file; collect them, then add in one go.
+    fn file_dropped(&self, path: PathBuf) {
+        self.window.set_files_hovering(false);
+        let first = {
+            let mut d = self.dropped.borrow_mut();
+            d.push(path);
+            d.len() == 1
+        };
+        if first {
+            slint::Timer::single_shot(Duration::from_millis(30), || {
+                with_app(|a| {
+                    let paths = std::mem::take(&mut *a.dropped.borrow_mut());
+                    a.add_paths(paths);
+                });
+            });
+        }
+    }
+
+    fn pick_paths(&self, folders: bool) {
+        std::thread::spawn(move || {
+            let dialog = rfd::FileDialog::new();
+            let picked = if folders {
+                dialog.set_title("Add folders to Launchpad").pick_folders()
+            } else {
+                dialog
+                    .set_title("Add apps to Launchpad")
+                    .add_filter("Apps and shortcuts", &["exe", "lnk", "url", "appref-ms", "bat", "cmd", "msc"])
+                    .add_filter("All files", &["*"])
+                    .pick_files()
+            };
+            if let Some(paths) = picked {
+                on_ui(move |a| a.add_paths(paths));
+            }
+        });
+    }
+
+    fn add_paths(&self, paths: Vec<PathBuf>) {
+        if paths.is_empty() {
+            return;
+        }
+        let nav = self.nav.get();
+        let mut added = 0;
+        self.edit(|c| {
+            for p in paths {
+                if items::add_path(c, nav, p).is_some() {
+                    added += 1;
+                }
+            }
+        });
+        let target = nav.and_then(|g| items::find_group(&self.cfg.borrow(), g).map(|g| g.title.clone()));
+        let target = target.unwrap_or_else(|| "Home".into());
+        match added {
+            0 => self.set_status("Nothing was added — those items couldn't be found.", true, StatusAction::None),
+            1 => self.set_status(&format!("Added 1 item to {target}"), false, StatusAction::None),
+            n => self.set_status(&format!("Added {n} items to {target}"), false, StatusAction::None),
+        }
+    }
+
+    fn pick_icon(&self, id: ItemId) {
+        let icons_dir = self.store.borrow().icons_dir();
+        std::thread::spawn(move || {
+            let Some(src) = rfd::FileDialog::new()
+                .set_title("Choose an icon")
+                .add_filter("Images", &["png", "ico", "jpg", "jpeg", "bmp"])
+                .pick_file()
+            else {
+                return;
+            };
+            // Copy into the icons folder so the config stays portable.
+            let _ = std::fs::create_dir_all(&icons_dir);
+            let ext = src.extension().and_then(|e| e.to_str()).unwrap_or("png").to_ascii_lowercase();
+            let name = PathBuf::from(format!("{}.{ext}", uuid::Uuid::new_v4()));
+            let result = std::fs::copy(&src, icons_dir.join(&name)).map_err(|e| e.to_string());
+            on_ui(move |a| match result {
+                Ok(_) => a.edit(|c| {
+                    let _ = items::set_icon(c, id, Some(name));
+                }),
+                Err(e) => a.set_status(&format!("Couldn't copy the icon: {e}"), true, StatusAction::None),
+            });
+        });
+    }
+
+    // ── Dialogs ────────────────────────────────────────────────────────────────
+
+    fn open_dialog(&self, d: Dialog, title: &str, message: &str, text: &str) {
+        let kind = match d {
+            Dialog::None => "",
+            Dialog::Rename(_) => "rename",
+            Dialog::NewGroup => "new-group",
+            Dialog::Move(_) => "move",
+            Dialog::DeleteGroup(_) => "delete-group",
+            Dialog::FirstRun => "first-run",
+            Dialog::Migrate => "migrate",
+        };
+        self.dialog.set(d);
+        let w = &self.window;
+        w.set_dialog_title(title.into());
+        w.set_dialog_message(message.into());
+        w.set_dialog_text(text.into());
+        w.set_dialog(kind.into());
+    }
+
+    fn close_dialog(&self) {
+        self.dialog.set(Dialog::None);
+        self.window.set_dialog(SharedString::new());
+    }
+
+    fn dialog_confirm(&self, text: &str) {
+        let name = text.trim().to_owned();
+        match self.dialog.get() {
+            Dialog::Rename(id) => {
+                if name.is_empty() {
+                    return;
+                }
+                self.edit(|c| {
+                    let _ = items::rename_item(c, id, name);
+                });
+            }
+            Dialog::NewGroup => {
+                if name.is_empty() {
+                    return;
+                }
+                self.edit(|c| {
+                    items::add_group(c, name);
+                });
+            }
+            Dialog::Move(id) => {
+                if name.is_empty() {
+                    return;
+                }
+                let mut result = Ok(());
+                self.edit(|c| {
+                    let gid = items::add_group(c, name.clone());
+                    result = items::move_to_group(c, id, gid);
+                });
+                match result {
+                    Ok(()) => {
+                        self.set_status(&format!("Created {name} and moved the item there"), false, StatusAction::None)
+                    }
+                    Err(e) => self.set_status(&e, true, StatusAction::None),
+                }
+            }
+            Dialog::DeleteGroup(gid) => {
+                let title = items::find_group(&self.cfg.borrow(), gid).map(|g| g.title.clone()).unwrap_or_default();
+                self.remove_with_undo(gid, &title);
+            }
+            Dialog::Migrate => self.run_icon_migration(),
+            Dialog::FirstRun | Dialog::None => {}
+        }
+        self.close_dialog();
+    }
+
+    fn dialog_cancel(&self) {
+        match self.dialog.get() {
+            Dialog::FirstRun => return,
+            Dialog::Migrate => self.migration.borrow_mut().clear(),
+            _ => {}
+        }
+        self.close_dialog();
+    }
+
+    fn dialog_alt(&self) {
+        if let Dialog::DeleteGroup(gid) = self.dialog.get() {
+            self.ungroup(gid);
+        }
+        self.close_dialog();
+    }
+
+    fn move_to(&self, gid: &str) {
+        let (Dialog::Move(id), Some(gid)) = (self.dialog.get(), parse_id(gid)) else { return };
+        let mut result = Ok(());
+        self.edit(|c| result = items::move_to_group(c, id, gid));
+        let name = items::find_group(&self.cfg.borrow(), gid).map(|g| g.title.clone()).unwrap_or_default();
+        match result {
+            Ok(()) => self.set_status(&format!("Moved to {name}"), false, StatusAction::None),
+            Err(e) => self.set_status(&e, true, StatusAction::None),
+        }
+        self.close_dialog();
+    }
+
+    fn first_run_choice(&self, portable: bool) {
+        let result = {
+            let cfg = self.cfg.borrow();
+            self.store.borrow_mut().finalize_first_run(portable, &cfg)
+        };
+        self.close_dialog();
+        match result {
+            Ok(is_portable) => {
+                if portable && !is_portable {
+                    self.set_status(
+                        "Couldn't write next to launchpad.exe, so settings are kept in AppData instead.",
+                        true,
+                        StatusAction::None,
+                    );
+                }
+                self.save_now();
+                self.push_settings();
+            }
+            Err(e) => self.set_status(&format!("Couldn't create the settings file: {e}"), true, StatusAction::None),
+        }
+    }
+
+    /// Older versions stored absolute icon paths; offer to copy them into icons/.
+    fn check_icon_migration(&self) {
+        let icons_dir = self.store.borrow().icons_dir();
+        let found = find_external_icons(&self.cfg.borrow(), &icons_dir);
+        if found.is_empty() {
+            return;
+        }
+        let n = found.len();
+        *self.migration.borrow_mut() = found;
+        self.open_dialog(
+            Dialog::Migrate,
+            "Copy custom icons?",
+            &format!(
+                "{} point to images outside Launchpad's icons folder. Copy them in so they keep working if the originals move?",
+                if n == 1 { "1 custom icon".to_owned() } else { format!("{n} custom icons") }
+            ),
+            "",
+        );
+    }
+
+    fn run_icon_migration(&self) {
+        let icons_dir = self.store.borrow().icons_dir();
+        let _ = std::fs::create_dir_all(&icons_dir);
+        let todo = std::mem::take(&mut *self.migration.borrow_mut());
+        let mut copied = 0;
+        self.edit(|c| {
+            for (id, old) in todo {
+                let ext = old.extension().and_then(|e| e.to_str()).unwrap_or("png").to_ascii_lowercase();
+                let name = PathBuf::from(format!("{}.{ext}", uuid::Uuid::new_v4()));
+                if std::fs::copy(&old, icons_dir.join(&name)).is_ok() && items::set_icon(c, id, Some(name)).is_ok() {
+                    copied += 1;
+                }
+            }
+        });
+        self.set_status(&format!("Copied {copied} icon(s) into the icons folder"), false, StatusAction::None);
+    }
+
+    // ── Status banner ──────────────────────────────────────────────────────────
+
+    fn set_status(&self, msg: &str, error: bool, action: StatusAction) {
+        if action != StatusAction::Undo {
+            self.undo.borrow_mut().take();
+        }
+        self.status_action.set(action);
+        let w = &self.window;
+        w.set_status(msg.into());
+        w.set_status_is_error(error);
+        w.set_status_action(if action == StatusAction::Undo { "Undo".into() } else { SharedString::new() });
+        self.status_timer.start(slint::TimerMode::SingleShot, if error { ERROR_FOR } else { STATUS_FOR }, || {
+            with_app(|a| a.clear_status());
+        });
+    }
+
+    fn clear_status(&self) {
+        self.status_timer.stop();
+        self.undo.borrow_mut().take();
+        self.status_action.set(StatusAction::None);
+        self.window.set_status(SharedString::new());
+        self.window.set_status_action(SharedString::new());
+    }
+
+    fn status_clicked(&self) {
+        if self.status_action.get() == StatusAction::Undo {
+            if let Some(items) = self.undo.borrow_mut().take() {
+                self.edit(|c| c.items = items);
+            }
+        }
+        self.clear_status();
+    }
+
+    // ── Theme & layout ─────────────────────────────────────────────────────────
+
+    fn apply_theme(&self) {
+        let colors = theme::current(&self.cfg.borrow());
+        apply_colors(&self.window, &colors);
+        let w = self.window.window();
+        if w.is_visible() {
+            w.with_winit_window(|ww| ui::apply_native_chrome(ww, colors.dark));
+        }
+        if let Some(s) = self.settings.borrow().as_ref() {
+            apply_settings_colors(s, &colors);
+            s.window().with_winit_window(|ww| ui::apply_native_chrome(ww, colors.dark));
+        }
+    }
+
+    fn push_layout(&self) {
+        let cfg = self.cfg.borrow();
+        let w = &self.window;
+        w.set_base_icon_size(cfg.grid_icon_size);
+        w.set_spacing(cfg.grid_spacing);
+        w.set_auto_fit(cfg.auto_fit);
+        w.set_keep_on_top(cfg.always_on_top);
+    }
+
+    // ── Hotkey ─────────────────────────────────────────────────────────────────
+
+    fn apply_hotkey(&self) {
+        let (text, on_release) = {
+            let c = self.cfg.borrow();
+            (c.hotkey.clone(), c.hotkey_on_release)
+        };
+        let result = match self.hotkey.borrow_mut().as_mut() {
+            Some(h) => h.apply(&text, on_release),
+            None => Err("Global shortcuts aren't available on this system.".into()),
+        };
+        *self.hotkey_error.borrow_mut() = result.err().unwrap_or_default();
+        if let Some(t) = self.tray.borrow().as_ref() {
+            t.set_hotkey_label(&hotkey::label(&text));
+        }
+        self.push_settings();
+    }
+
+    fn start_capture(&self) {
+        if let Some(h) = self.hotkey.borrow_mut().as_mut() {
+            h.suspend();
+        }
+        self.capturing.set(true);
+        self.push_settings();
+    }
+
+    fn end_capture(&self) {
+        if self.capturing.replace(false) {
+            self.apply_hotkey();
+        }
+    }
+
+    fn key_captured(&self, text: &str, ctrl: bool, alt: bool, shift: bool, meta: bool) {
+        match capture_from_key_event(text, ctrl, alt, shift, meta) {
+            Capture::Captured(acc) => {
+                self.cfg.borrow_mut().hotkey = acc.to_string();
+                self.schedule_save();
+                self.end_capture();
+            }
+            Capture::Clear => {
+                self.cfg.borrow_mut().hotkey.clear();
+                self.schedule_save();
+                self.end_capture();
+            }
+            Capture::Cancel => self.end_capture(),
+            Capture::Pending => {}
+            Capture::Invalid(why) => {
+                if let Some(s) = self.settings.borrow().as_ref() {
+                    s.set_hotkey_note(why.into());
+                    s.set_hotkey_note_is_error(true);
                 }
             }
         }
-        collect(&self.config.items, &q, &mut results);
-        results
     }
 
-    fn render_icon_migration_dialog(&mut self, ctx: &egui::Context) {
-        let count = self.icon_migration.len();
-        let center = ctx.screen_rect().center();
-        egui::Window::new("Icon Migration")
-            .default_pos(center)
-            .collapsible(false)
-            .resizable(false)
-            .movable(true)
-            .constrain(false)
-            .show(ctx, |ui| {
-                ui.label(format!(
-                    "Found {} custom icon(s) stored outside the icons folder.",
-                    count
-                ));
-                ui.label("Would you like to copy them into the local icons folder?");
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    if ui.button("Move").clicked() {
-                        let icons_dir = self.config_manager.icons_dir();
-                        let _ = std::fs::create_dir_all(&icons_dir);
-                        for (item_id, old_path) in self.icon_migration.drain(..) {
-                            if old_path.exists() {
-                                let ext = old_path
-                                    .extension()
-                                    .and_then(|e| e.to_str())
-                                    .unwrap_or("png");
-                                let dest =
-                                    icons_dir.join(format!("{}.{}", uuid::Uuid::new_v4(), ext));
-                                if std::fs::copy(&old_path, &dest).is_ok() {
-                                    let filename =
-                                        dest.file_name().map(PathBuf::from).unwrap_or_default();
-                                    let _ = commands::items::set_icon(
-                                        &mut self.config,
-                                        item_id,
-                                        filename,
-                                    );
-                                }
-                            }
-                        }
-                        self.mark_dirty();
-                    }
-                    if ui.button("Cancel").clicked() {
-                        self.icon_migration.clear();
-                    }
+    // ── Settings window ────────────────────────────────────────────────────────
+
+    fn open_settings(&self) {
+        if self.settings.borrow().is_none() {
+            match self.build_settings() {
+                Ok(s) => *self.settings.borrow_mut() = Some(s),
+                Err(e) => {
+                    log::error!("cannot create settings window: {e}");
+                    return;
+                }
+            }
+        }
+        self.push_settings();
+        let dark = theme::current(&self.cfg.borrow()).dark;
+        if let Some(s) = self.settings.borrow().as_ref() {
+            let _ = s.show();
+            s.window().with_winit_window(|ww| {
+                ui::apply_native_chrome(ww, dark);
+                ww.set_minimized(false);
+                ww.focus_window();
+            });
+        }
+        self.apply_chrome_soon();
+    }
+
+    fn build_settings(&self) -> Result<SettingsWindow, slint::PlatformError> {
+        let s = SettingsWindow::new()?;
+        s.set_app_icon(ui::app_icon_image(64));
+        s.set_version(env!("CARGO_PKG_VERSION").into());
+        s.set_themes(ModelRc::from(self.theme_options.clone()));
+        apply_settings_colors(&s, &theme::current(&self.cfg.borrow()));
+
+        s.window().on_close_requested(|| {
+            // Can't drop the component inside its own callback; do it next tick.
+            slint::Timer::single_shot(Duration::ZERO, || {
+                with_app(|a| {
+                    a.end_capture();
+                    a.settings.borrow_mut().take();
                 });
             });
+            slint::CloseRequestResponse::HideWindow
+        });
+        s.on_start_capture(|| {
+            with_app(|a| a.start_capture());
+        });
+        s.on_cancel_capture(|| {
+            with_app(|a| a.end_capture());
+        });
+        s.on_key_captured(|text, ctrl, alt, shift, meta| {
+            with_app(|a| a.key_captured(text.as_str(), ctrl, alt, shift, meta));
+        });
+        s.on_clear_hotkey(|| {
+            with_app(|a| {
+                a.cfg.borrow_mut().hotkey.clear();
+                a.schedule_save();
+                a.capturing.set(false);
+                a.apply_hotkey();
+            });
+        });
+        s.on_set_flag(|name, v| {
+            with_app(|a| a.set_flag(name.as_str(), v));
+        });
+        s.on_pick_theme(|i| {
+            with_app(|a| {
+                let names = theme::names(&a.cfg.borrow());
+                if let Some(name) = names.get(i as usize) {
+                    a.cfg.borrow_mut().selected_theme = (name != "Dark").then(|| name.clone());
+                    a.schedule_save();
+                    a.apply_theme();
+                    a.push_settings();
+                }
+            });
+        });
+        s.on_set_icon_size(|v| {
+            with_app(|a| {
+                a.cfg.borrow_mut().grid_icon_size = v.clamp(32.0, 128.0);
+                a.schedule_save();
+                a.push_layout();
+                a.push_settings();
+            });
+        });
+        s.on_set_spacing(|v| {
+            with_app(|a| {
+                a.cfg.borrow_mut().grid_spacing = v.clamp(0.0, 40.0);
+                a.schedule_save();
+                a.push_layout();
+                a.push_settings();
+            });
+        });
+        s.on_open_url(|url| shell::open_url(url.as_str()));
+        s.on_open_config_dir(|| {
+            with_app(|a| {
+                if let Some(dir) = a.store.borrow().path().parent() {
+                    shell::open_folder(dir);
+                }
+            });
+        });
+        Ok(s)
+    }
+
+    fn set_flag(&self, name: &str, v: bool) {
+        match name {
+            "hotkey-on-release" => {
+                self.cfg.borrow_mut().hotkey_on_release = v;
+                self.apply_hotkey();
+            }
+            "hide-on-launch" => self.cfg.borrow_mut().hide_on_launch = v,
+            "keep-on-top" => self.cfg.borrow_mut().always_on_top = v,
+            "close-to-tray" => self.cfg.borrow_mut().close_to_tray = v,
+            "auto-fit" => self.cfg.borrow_mut().auto_fit = v,
+            "auto-start" => match autostart::set_enabled(v) {
+                Ok(()) => self.cfg.borrow_mut().auto_start = v,
+                Err(e) => {
+                    self.set_status(&format!("Couldn't change Start with Windows: {e}"), true, StatusAction::None)
+                }
+            },
+            _ => log::warn!("unknown setting {name}"),
+        }
+        self.schedule_save();
+        self.push_layout();
+        self.push_settings();
+    }
+
+    fn push_settings(&self) {
+        let settings = self.settings.borrow();
+        let Some(s) = settings.as_ref() else { return };
+        let cfg = self.cfg.borrow();
+        s.set_dark(theme::current(&cfg).dark);
+        s.set_hotkey(if cfg.hotkey.is_empty() { SharedString::new() } else { hotkey::label(&cfg.hotkey).into() });
+        s.set_capturing(self.capturing.get());
+        let err = self.hotkey_error.borrow();
+        let (note, is_err) = if self.capturing.get() {
+            (CAPTURE_HINT.to_owned(), false)
+        } else if !err.is_empty() {
+            (err.clone(), true)
+        } else {
+            (String::new(), false)
+        };
+        s.set_hotkey_note(note.into());
+        s.set_hotkey_note_is_error(is_err);
+        s.set_hotkey_on_release(cfg.hotkey_on_release);
+        s.set_hide_on_launch(cfg.hide_on_launch);
+        s.set_keep_on_top(cfg.always_on_top);
+        s.set_close_to_tray(cfg.close_to_tray);
+        s.set_auto_start(cfg.auto_start);
+        s.set_auto_fit(cfg.auto_fit);
+        s.set_icon_size(cfg.grid_icon_size);
+        s.set_spacing(cfg.grid_spacing);
+
+        let options = theme::options(&cfg);
+        if self.theme_options.row_count() != options.len() {
+            self.theme_options.set_vec(options);
+        }
+        let current = theme::current_name(&cfg);
+        let idx = theme::names(&cfg).iter().position(|n| *n == current).unwrap_or(0);
+        s.set_theme_index(idx as i32);
+
+        let store = self.store.borrow();
+        s.set_config_path(store.path().display().to_string().into());
+        let portable = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf))
+            == store.path().parent().map(Path::to_path_buf);
+        s.set_portable(portable);
     }
 }
 
-/// Scan config for icon paths pointing outside the icons directory.
-fn find_external_icons(config: &Config, icons_dir: &std::path::Path) -> Vec<(ItemId, PathBuf)> {
-    let mut result = Vec::new();
-    fn scan(items: &[LaunchItem], icons_dir: &std::path::Path, out: &mut Vec<(ItemId, PathBuf)>) {
+fn apply_colors(w: &MainWindow, colors: &ThemeColors) {
+    w.global::<crate::Theme>().set_c(colors.clone());
+    w.set_dark(colors.dark);
+}
+
+fn apply_settings_colors(s: &SettingsWindow, colors: &ThemeColors) {
+    s.global::<crate::Theme>().set_c(colors.clone());
+    s.set_dark(colors.dark);
+}
+
+/// The file or folder an item opens, with `$(Drive)` expanded. `None` for groups.
+fn target_of(item: &LaunchItem) -> Option<PathBuf> {
+    match item {
+        LaunchItem::App(a) => Some(expand_path(&a.executable_path)),
+        LaunchItem::Folder(f) => Some(expand_path(&f.folder_path)),
+        LaunchItem::Group(_) => None,
+    }
+}
+
+fn parse_id(s: &str) -> Option<ItemId> {
+    uuid::Uuid::parse_str(s).ok().map(ItemId)
+}
+
+/// Move the window to the primary monitor if its saved position is off every screen
+/// (e.g. a monitor was unplugged).
+fn keep_on_screen(ww: &slint::winit_030::winit::window::Window) {
+    let Ok(pos) = ww.outer_position() else { return };
+    let size = ww.outer_size();
+    let (cx, cy) = (pos.x + size.width as i32 / 2, pos.y + 20);
+    let visible = ww.available_monitors().any(|m| {
+        let (mp, ms) = (m.position(), m.size());
+        cx >= mp.x && cx < mp.x + ms.width as i32 && cy >= mp.y && cy < mp.y + ms.height as i32
+    });
+    if visible {
+        return;
+    }
+    if let Some(m) = ww.primary_monitor().or_else(|| ww.available_monitors().next()) {
+        let (mp, ms) = (m.position(), m.size());
+        let x = mp.x + (ms.width as i32 - size.width as i32).max(0) / 2;
+        let y = mp.y + (ms.height as i32 - size.height as i32).max(0) / 3;
+        ww.set_outer_position(slint::winit_030::winit::dpi::PhysicalPosition::new(x, y));
+    }
+}
+
+/// Custom icon paths pointing outside the icons directory (old config format).
+fn find_external_icons(config: &Config, icons_dir: &Path) -> Vec<(ItemId, PathBuf)> {
+    fn scan(items: &[LaunchItem], icons_dir: &Path, out: &mut Vec<(ItemId, PathBuf)>) {
         for item in items {
-            let icon_path = match item {
-                LaunchItem::App(a) => &a.icon_path,
-                LaunchItem::Group(g) => &g.icon_path,
-                LaunchItem::Folder(f) => &f.icon_path,
-            };
-            if let Some(ref p) = icon_path {
-                // External = has a parent directory that is NOT the icons folder.
-                // Bare filenames (e.g. "uuid.ico") are already in the new format.
-                let is_external = p.parent().map_or(false, |parent| {
-                    !parent.as_os_str().is_empty() && parent != icons_dir
-                });
-                if is_external {
+            if let Some(p) = items::icon_path(item) {
+                // Bare filenames are already in the icons folder.
+                let external = p.parent().is_some_and(|parent| !parent.as_os_str().is_empty() && parent != icons_dir);
+                if external && p.exists() {
                     out.push((item.id(), p.clone()));
                 }
             }
@@ -1487,381 +1362,7 @@ fn find_external_icons(config: &Config, icons_dir: &std::path::Path) -> Vec<(Ite
             }
         }
     }
-    scan(&config.items, icons_dir, &mut result);
-    result
-}
-
-// ─── Keyboard ────────────────────────────────────────────
-impl LaunchpadApp {
-    fn handle_keyboard(&mut self, ctx: &Context) {
-        let theme = self.config.resolve_theme();
-        let isz = theme.grid_icon_size.unwrap_or(self.config.grid_icon_size);
-        let sp = theme.grid_spacing.unwrap_or(self.config.grid_spacing);
-        let iw = isz + 48.0;
-        let cols = ((640.0_f32 + sp) / (iw + sp)).floor() as usize;
-        let mut sel = self.selected_index;
-        let items: Vec<LaunchItem> = if self.search_query.is_empty() {
-            self.current_items().to_vec()
-        } else {
-            self.search_all_items(&self.search_query)
-        };
-        let max = items.len().saturating_sub(1);
-        let inp = ctx.input(|i| i.clone());
-        if inp.key_pressed(egui::Key::ArrowRight) {
-            sel = Some(sel.map_or(0, |i| (i + 1).min(max)));
-        }
-        if inp.key_pressed(egui::Key::ArrowLeft) {
-            sel = Some(sel.map_or(max, |i| i.saturating_sub(1)));
-        }
-        if inp.key_pressed(egui::Key::ArrowDown) {
-            sel = Some(sel.map_or(0, |i| (i + cols).min(max)));
-        }
-        if inp.key_pressed(egui::Key::ArrowUp) {
-            sel = Some(sel.map_or(0, |i| if i >= cols { i - cols } else { 0 }));
-        }
-        if inp.key_pressed(egui::Key::Enter) {
-            if let Some(idx) = sel {
-                if let Some(item) = items.get(idx) {
-                    self.activate_item(item);
-                }
-            }
-        }
-        if inp.key_pressed(egui::Key::Backspace) && !self.nav_stack.is_empty() {
-            self.navigate_back();
-        }
-        if inp.key_pressed(egui::Key::Escape) && !self.search_query.is_empty() {
-            self.search_query.clear();
-        }
-        self.selected_index = sel;
-    }
-}
-
-// ─── Drag & Drop ─────────────────────────────────────────
-impl LaunchpadApp {
-    fn handle_dropped_files(&mut self, ctx: &egui::Context) {
-        // If we're inside a group, add to that group instead of root
-        let target_group = self.nav_stack.last().copied();
-        for file in &ctx.input(|i| i.raw.dropped_files.clone()) {
-            if let Some(ref path) = file.path {
-                let path = std::path::PathBuf::from(path);
-                if path.is_dir() {
-                    let title = path
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("Folder")
-                        .to_string();
-                    if let Some(gid) = target_group {
-                        let _ = commands::items::add_folder_to_group(
-                            &mut self.config,
-                            gid,
-                            title,
-                            path,
-                        );
-                    } else {
-                        commands::items::add_folder(&mut self.config, title, path);
-                    }
-                } else {
-                    let ext = path
-                        .extension()
-                        .and_then(|e| e.to_str())
-                        .unwrap_or("")
-                        .to_lowercase();
-                    if ext == "exe" || ext == "lnk" {
-                        let title = path
-                            .file_stem()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("App")
-                            .to_string();
-                        if let Some(gid) = target_group {
-                            let _ = commands::items::add_app_to_group(
-                                &mut self.config,
-                                gid,
-                                title,
-                                path,
-                            );
-                        } else {
-                            commands::items::add_app(&mut self.config, title, path);
-                        }
-                    }
-                }
-                self.mark_dirty();
-            }
-        }
-    }
-}
-
-// ─── Demo ────────────────────────────────────────────────
-impl LaunchpadApp {
-    fn add_demo_items(&mut self) {
-        use commands::items;
-        use std::path::PathBuf;
-        items::add_app(
-            &mut self.config,
-            "Notepad".into(),
-            PathBuf::from("C:\\Windows\\System32\\notepad.exe"),
-        );
-        items::add_app(
-            &mut self.config,
-            "Calculator".into(),
-            PathBuf::from("C:\\Windows\\System32\\calc.exe"),
-        );
-        items::add_app(
-            &mut self.config,
-            "Command Prompt".into(),
-            PathBuf::from("C:\\Windows\\System32\\cmd.exe"),
-        );
-        items::add_app(
-            &mut self.config,
-            "Paint".into(),
-            PathBuf::from("C:\\Windows\\System32\\mspaint.exe"),
-        );
-        items::add_folder(
-            &mut self.config,
-            "Documents".into(),
-            PathBuf::from("C:\\Users\\X4Lo\\Documents"),
-        );
-        items::add_folder(
-            &mut self.config,
-            "Downloads".into(),
-            PathBuf::from("C:\\Users\\X4Lo\\Downloads"),
-        );
-        let g = items::add_group(&mut self.config, "Games".into());
-        items::add_app_to_group(
-            &mut self.config,
-            g,
-            "Steam".into(),
-            PathBuf::from("C:\\Program Files (x86)\\Steam\\steam.exe"),
-        )
-        .ok();
-        let w = items::add_group(&mut self.config, "Work".into());
-        items::add_app_to_group(
-            &mut self.config,
-            w,
-            "Notepad".into(),
-            PathBuf::from("C:\\Windows\\System32\\notepad.exe"),
-        )
-        .ok();
-        self.mark_dirty();
-    }
-}
-
-fn group_name(config: &Config, gid: ItemId) -> String {
-    config
-        .items
-        .iter()
-        .filter_map(|item| {
-            if let LaunchItem::Group(g) = item {
-                if g.id == gid {
-                    Some(g.title.clone())
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        })
-        .next()
-        .unwrap_or_default()
-}
-
-fn group_name_with_icon(config: &Config, gid: ItemId) -> (String, egui::Color32) {
-    config
-        .items
-        .iter()
-        .filter_map(|item| match item {
-            LaunchItem::Group(g) if g.id == gid => {
-                Some((g.title.clone(), egui::Color32::from_rgb(0xF2, 0xC9, 0x4C)))
-            }
-            LaunchItem::Folder(f) if f.id == gid => {
-                Some((f.title.clone(), egui::Color32::from_rgb(0x64, 0xB4, 0xFF)))
-            }
-            _ => None,
-        })
-        .next()
-        .unwrap_or_default()
-}
-fn unique_name(base: &str, existing: &[String]) -> String {
-    if !existing.iter().any(|n| n == base) {
-        return base.to_string();
-    }
-    for i in 1..100 {
-        let c = format!("{} {}", base, i);
-        if !existing.iter().any(|n| n == &c) {
-            return c;
-        }
-    }
-    format!("{} {}", base, existing.len() + 1)
-}
-
-fn swatch(ui: &mut egui::Ui, label: &str, hex: &str) {
-    if let Some(color) = crate::config::manager::Theme::parse_hex(hex) {
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(28.0, 18.0), egui::Sense::hover());
-        ui.painter()
-            .rect_filled(rect, egui::CornerRadius::same(3), color);
-        ui.painter().text(
-            rect.center(),
-            egui::Align2::CENTER_CENTER,
-            label,
-            egui::FontId::proportional(10.0),
-            egui::Color32::BLACK,
-        );
-    }
-}
-
-fn hex_opt(s: &Option<String>) -> Option<egui::Color32> {
-    crate::config::manager::Theme::parse_hex(s.as_deref()?)
-}
-
-// ─── Icon drawing helpers (no emojis) ─────────────────────
-
-/// Draw up and down arrow triangles for the reorder toggle button.
-fn draw_updown_arrows(p: &egui::Painter, rect: egui::Rect, color: egui::Color32) {
-    let cx = rect.center().x;
-    let gap = 2.0;
-    let hw = 4.0; // half-width of triangle
-                  // Up arrow
-    let up_y = rect.center().y - gap;
-    p.line_segment(
-        [egui::pos2(cx, up_y - 3.0), egui::pos2(cx, up_y + 1.0)],
-        egui::Stroke::new(1.5_f32, color),
-    );
-    p.line_segment(
-        [egui::pos2(cx - hw, up_y - 1.0), egui::pos2(cx, up_y + 1.0)],
-        egui::Stroke::new(1.5_f32, color),
-    );
-    p.line_segment(
-        [egui::pos2(cx + hw, up_y - 1.0), egui::pos2(cx, up_y + 1.0)],
-        egui::Stroke::new(1.5_f32, color),
-    );
-    // Down arrow
-    let dn_y = rect.center().y + gap;
-    p.line_segment(
-        [egui::pos2(cx, dn_y - 1.0), egui::pos2(cx, dn_y + 3.0)],
-        egui::Stroke::new(1.5_f32, color),
-    );
-    p.line_segment(
-        [egui::pos2(cx - hw, dn_y + 1.0), egui::pos2(cx, dn_y - 1.0)],
-        egui::Stroke::new(1.5_f32, color),
-    );
-    p.line_segment(
-        [egui::pos2(cx + hw, dn_y + 1.0), egui::pos2(cx, dn_y - 1.0)],
-        egui::Stroke::new(1.5_f32, color),
-    );
-}
-
-/// Draw a simple cog/gear icon using a circle and a dot.
-fn draw_cog(p: &egui::Painter, rect: egui::Rect, color: egui::Color32) {
-    let c = rect.center();
-    let r = 5.0;
-    // Outer circle
-    p.circle_stroke(c, r + 1.0, egui::Stroke::new(1.5_f32, color));
-    // Inner dot
-    p.circle_filled(c, 2.0, color);
-}
-
-/// Draw an up-pointing or down-pointing triangle.
-fn draw_triangle(ui: &egui::Ui, rect: egui::Rect, up: bool) {
-    let p = ui.painter();
-    let c = rect.center();
-    let color = egui::Color32::from_gray(180);
-    let hw = 5.0;
-    if up {
-        let top = c.y - 3.0;
-        let bot = c.y + 4.0;
-        p.line_segment(
-            [egui::pos2(c.x - hw, bot), egui::pos2(c.x, top)],
-            egui::Stroke::new(1.5_f32, color),
-        );
-        p.line_segment(
-            [egui::pos2(c.x + hw, bot), egui::pos2(c.x, top)],
-            egui::Stroke::new(1.5_f32, color),
-        );
-        p.line_segment(
-            [egui::pos2(c.x - hw, bot), egui::pos2(c.x + hw, bot)],
-            egui::Stroke::new(1.5_f32, color),
-        );
-    } else {
-        let top = c.y - 4.0;
-        let bot = c.y + 3.0;
-        p.line_segment(
-            [egui::pos2(c.x - hw, top), egui::pos2(c.x, bot)],
-            egui::Stroke::new(1.5_f32, color),
-        );
-        p.line_segment(
-            [egui::pos2(c.x + hw, top), egui::pos2(c.x, bot)],
-            egui::Stroke::new(1.5_f32, color),
-        );
-        p.line_segment(
-            [egui::pos2(c.x - hw, top), egui::pos2(c.x + hw, top)],
-            egui::Stroke::new(1.5_f32, color),
-        );
-    }
-}
-
-/// Draw a fit/resize icon: four outward-pointing arrows in corners.
-fn draw_fit_icon(p: &egui::Painter, rect: egui::Rect, color: egui::Color32) {
-    let c = rect.center();
-    let s = 3.0; // arrow arm length
-    let g = 4.0; // gap from corner
-    let stroke = egui::Stroke::new(1.5_f32, color);
-    // Top-left corner arrows
-    p.line_segment(
-        [
-            egui::pos2(c.x - g - s, c.y - g),
-            egui::pos2(c.x - g, c.y - g),
-        ],
-        stroke,
-    );
-    p.line_segment(
-        [
-            egui::pos2(c.x - g, c.y - g - s),
-            egui::pos2(c.x - g, c.y - g),
-        ],
-        stroke,
-    );
-    // Top-right corner arrows
-    p.line_segment(
-        [
-            egui::pos2(c.x + g + s, c.y - g),
-            egui::pos2(c.x + g, c.y - g),
-        ],
-        stroke,
-    );
-    p.line_segment(
-        [
-            egui::pos2(c.x + g, c.y - g - s),
-            egui::pos2(c.x + g, c.y - g),
-        ],
-        stroke,
-    );
-    // Bottom-left corner arrows
-    p.line_segment(
-        [
-            egui::pos2(c.x - g - s, c.y + g),
-            egui::pos2(c.x - g, c.y + g),
-        ],
-        stroke,
-    );
-    p.line_segment(
-        [
-            egui::pos2(c.x - g, c.y + g + s),
-            egui::pos2(c.x - g, c.y + g),
-        ],
-        stroke,
-    );
-    // Bottom-right corner arrows
-    p.line_segment(
-        [
-            egui::pos2(c.x + g + s, c.y + g),
-            egui::pos2(c.x + g, c.y + g),
-        ],
-        stroke,
-    );
-    p.line_segment(
-        [
-            egui::pos2(c.x + g, c.y + g + s),
-            egui::pos2(c.x + g, c.y + g),
-        ],
-        stroke,
-    );
+    let mut out = Vec::new();
+    scan(&config.items, icons_dir, &mut out);
+    out
 }

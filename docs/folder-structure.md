@@ -2,64 +2,38 @@
 
 ```
 Launchpad/
-├── Cargo.toml                  # Rust project manifest + dependencies
-├── Cargo.lock                  # Dependency lock file
-├── README.md                   # Project overview and usage guide
-├── .gitignore
-├── Prompt.md                   # Original project prompt / spec
-│
-├── docs/                       # Documentation
-│   ├── Architecture & Implementation Plan.md
-│   ├── phase-1-foundation.md
-│   ├── phase-2-config-data-model.md
-│   ├── phase-3-grid-ui.md
+├── Cargo.toml                  # Manifest (Slint, tray-icon, global-hotkey, windows, …)
+├── build.rs                    # Compiles ui/main.slint; embeds the exe icon (.ico/.res)
+├── rustfmt.toml                # width 120 (same as HushKey)
+├── README.md
+├── docs/
+│   ├── technical-reference.md  # How it works (threads, controller, UI, icons)
+│   ├── themes.md               # Built-in and custom themes
 │   ├── changelog-recent.md
-│   ├── technical-reference.md  # Detailed module reference
-│   └── folder-structure.md     # This file
-│
-├── resources/                  # Bundled assets (icons, images)
-│
-└── src/                        # Application source code
-    ├── main.rs                 # Entry point: init logging, config, tray, hotkey, egui
-    │
-    ├── app.rs                  # LaunchpadApp: state, eframe::App impl, all rendering
-    │
-    ├── config/
-    │   ├── mod.rs
-    │   └── manager.rs          # Config, Theme, ConfigManager (load/save/portable)
-    │
-    ├── models/
-    │   ├── mod.rs              # Re-exports
-    │   ├── item.rs             # ItemId, LaunchItem enum
-    │   ├── app_item.rs         # AppItem struct
-    │   ├── group_item.rs       # GroupItem struct
-    │   └── folder_item.rs      # FolderItem struct
-    │
-    ├── commands/
-    │   ├── mod.rs
-    │   └── items.rs            # CRUD operations on config items + tests
-    │
+│   ├── folder-structure.md     # This file
+│   └── Architecture & Implementation Plan.md   # Original (egui-era) plan, historical
+├── resources/                  # Screenshot for the README
+├── ui/                         # Slint markup, compiled at build time
+│   ├── theme.slint             # Theme global + ThemeColors tokens
+│   ├── widgets.slint           # Glyphs, buttons, fields, switches, sliders, menus
+│   ├── main.slint              # MainWindow: header, search, grid, menus, dialogs
+│   └── settings.slint          # SettingsWindow: General / Appearance / About
+└── src/
+    ├── main.rs                 # Logging, single instance, backend selection, event loop
+    ├── app.rs                  # App controller: state, callbacks, windows, dialogs
+    ├── models/                 # AppItem, FolderItem, GroupItem, LaunchItem, ItemId
+    ├── commands/items.rs       # Item-tree mutations + search (unit-tested)
+    ├── config/manager.rs       # Config, custom Theme, ConfigManager, $(Drive) expansion
     ├── platform/
-    │   ├── mod.rs
-    │   ├── tray.rs             # System tray icon + menu
-    │   ├── hotkey.rs           # Global hotkey (Ctrl+Alt+R)
-    │   └── icons.rs            # IconExtractor trait (platform abstraction)
-    │
-    ├── ui/
-    │   ├── mod.rs
-    │   ├── theme.rs            # Visual theme from Config
-    │   ├── icons.rs            # IconCache, IconKey, extraction + generation
-    │   ├── grid.rs             # Grid layout helper
-    │   ├── item_card.rs        # Single item card rendering
-    │   ├── launcher.rs         # Full launcher layout
-    │   └── context_menu.rs     # Placeholder (menus are inline in app.rs)
-    │
-    └── utils.rs                # generate_tray_icon()
+    │   ├── shell.rs            # Launching, Show in Explorer, icon extraction workers
+    │   ├── hotkey/             # Global hotkey + Accelerator parsing/capture
+    │   ├── tray.rs             # Tray icon and menu
+    │   ├── autostart.rs        # Start with Windows (HKCU Run)
+    │   └── instance.rs         # Single-instance guard
+    └── ui/
+        ├── icon.rs             # Procedural app icon (std-only; shared with build.rs)
+        ├── theme.rs            # Built-in palettes, custom-theme mapping
+        └── mod.rs              # Image helpers, native window chrome, auto-fit sizing
 ```
 
-## Key design decisions
-
-- **Everything in `app.rs`** — The rendering, event handling, and state management live in `LaunchpadApp` to keep egui's immediate-mode flow simple. Sub-modules handle data models and pure logic.
-- **`thread_local!` CTX** — The egui `Context` is stored in a thread-local so non-`update` methods can send viewport commands (e.g., minimize on launch).
-- **Atomic config saves** — Writes go to a `.tmp` file, then rename over the real path to prevent corruption.
-- **Portable mode** — If `config.json` exists next to the `.exe`, the app uses it instead of `%APPDATA%`.
+`ui/*.slint` is markup; `src/ui/` is the Rust side of the UI. Platform code stays in `src/platform/`, so `app.rs` never calls Win32 directly.

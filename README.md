@@ -8,18 +8,14 @@ A lightweight, minimalistic desktop application launcher for Windows. Keep your 
 
 ## Features
 
-- **Global hotkey** — Configurable shortcut (default `Ctrl+Alt+R`) toggles window visibility
-- **System tray** — Runs quietly in the background with Show/Hide and Quit menu
-- **Themes** — Built-in Default, Dracula, Nord, and Catppuccin themes with full color/spacing customization
-- **Search** — Search box filters all items across groups in real time
-- **Drag & drop** — Drop executables or shortcuts to add them instantly
-- **Groups & folders** — Organize apps into navigable groups and filesystem folder shortcuts
-- **Custom icons** — Assign custom icons, auto-extracted from executables, stored locally as portable filenames
-- **Reorder** — List view with up/down buttons to reorder items at any level
-- **Auto-fit** — Toggle that dynamically resizes icons to fill the window
-- **Context menus** — Right-click to rename, change icon, move to group, or remove
-- **Resizable** — Drag bottom/right/corner edges or use the fit button
-- **Auto-start with Windows** — Registry-based, toggle in Settings
+- **Global hotkey** — Configurable shortcut (default `Ctrl+Alt+R`) shows / hides the launcher; record it in Settings, applies instantly
+- **Instant search** — Start typing to filter apps, folders and groups everywhere; arrows + Enter launch
+- **Groups** — Organize items into groups (with a preview of their contents); drop a tile onto a group to move it in
+- **Drag & drop** — Drop executables, shortcuts, files or folders from Explorer; drag tiles to reorder
+- **Real icons** — Extracted from the Windows shell (shortcuts, legacy icons, folders), or pick your own
+- **Item menu** — Right-click (or Shift+F10): open, show in Explorer, rename, change icon, move between groups, remove (with Undo)
+- **Themes** — Dark, Light, Dracula, Nord, Catppuccin plus custom themes; adjustable icon size and spacing, or fit to window
+- **System tray** — Close to tray, start with Windows, hide after launching, keep on top
 - **Portable mode** — `config.json` next to the exe takes priority over `%APPDATA%`
 
 ## Installation
@@ -102,7 +98,7 @@ You can change it in `config.json`:
 }
 ```
 
-Or edit it from **Settings > General > Global Hotkey**. The change takes effect after restart.
+Or record it in **Settings → General → Show / hide Launchpad**: click the chip and press the keys. Changes apply immediately.
 
 **Supported modifiers:** `Ctrl`, `Alt`, `Shift`, `Win`/`Super`
 
@@ -137,7 +133,7 @@ Quick example — add this to your `config.json`:
 }
 ```
 
-Built-in themes: **Default**, **Dracula**, **Nord**, **Catppuccin**.
+Built-in themes: **Dark** (default), **Light**, **Dracula**, **Nord**, **Catppuccin**.
 
 ## Project structure
 
@@ -152,38 +148,44 @@ See [docs/folder-structure.md](docs/folder-structure.md) for the full directory 
 | [docs/technical-reference.md](docs/technical-reference.md) | Module-by-module API reference                         |
 | [docs/changelog-recent.md](docs/changelog-recent.md)       | Recent feature additions and fixes                     |
 
-## Keyboard shortcuts
+## Keyboard & mouse
 
-| Key              | Action                               |
-| ---------------- | ------------------------------------ |
-| `Ctrl + Alt + R` | Toggle Launchpad visibility          |
-| `Esc`            | Close context menu / go back to root |
-| `Backspace`      | Navigate up one level                |
-| `Enter`          | Open selected item                   |
-| Arrow keys       | Navigate grid items                  |
+| Input              | Action                                   |
+| ------------------ | ---------------------------------------- |
+| `Ctrl + Alt + R`   | Show / hide Launchpad (configurable)     |
+| Type               | Search everything                        |
+| Arrow keys, Enter  | Move the selection, open it              |
+| `Esc`              | Clear search → leave group → hide        |
+| `Backspace`        | Leave a group (when the search is empty) |
+| `F2` / `Del`       | Rename / remove the selected item        |
+| `Shift + F10`      | Item menu for the selection              |
+| `Ctrl + ,`         | Settings                                 |
+| Mouse back/forward | Leave a group / go back into it          |
 
 ## Auto-start with Windows
 
-Enable **Start with Windows** in Settings > General. Launchpad writes a registry value at:
+Enable **Start with Windows** in Settings → General. Launchpad writes a registry value at:
 
 ```
 HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run
-    "Launchpad" = "C:\path\to\launchpad.exe"
+    "Launchpad" = "\"C:\path\to\launchpad.exe\" --minimized"
 ```
 
-When disabled, the value is removed. No admin rights required.
+It starts in the tray. When disabled, the value is removed. No admin rights required.
 
 ## Item types
 
-| Type       | Icon                                  | Behavior                           |
-| ---------- | ------------------------------------- | ---------------------------------- |
-| **App**    | Extracted from executable (or custom) | Launches the application           |
-| **Group**  | Yellow folder (or custom)             | Navigates into a sub-grid of items |
-| **Folder** | Blue folder (or custom)               | Opens the folder in Explorer       |
+| Type       | Icon                                               | Behavior                           |
+| ---------- | -------------------------------------------------- | ---------------------------------- |
+| **App**    | From the Windows shell (or custom)                 | Launches the application           |
+| **Group**  | Preview of its first four items (or custom)        | Navigates into a sub-grid of items |
+| **Folder** | The folder's shell icon (or custom)                | Opens the folder in Explorer       |
+
+Items whose target no longer exists show a red **!** badge. Paths may use `$(Drive)` for the drive Launchpad runs from.
 
 ## Building
 
-**Requirements:** Rust 1.75+
+**Requirements:** Rust 1.82+
 
 ```bash
 cargo build # or
@@ -194,14 +196,14 @@ The release binary is optimized with LTO and stripped for minimal size.
 
 ## Tech stack
 
-- **[egui](https://github.com/emilk/egui) / eframe** — Immediate-mode GUI, frameless window
+- **[Slint](https://slint.dev)** — Declarative native UI, software renderer (no GPU context, no webview); same UI system as HushKey. Used under its royalty-free license (attribution in Settings → About).
 - **[tray-icon](https://crates.io/crates/tray-icon)** — System tray integration
 - **[global-hotkey](https://crates.io/crates/global-hotkey)** — Global keyboard shortcut registration
-- **[serde](https://serde.rs) / serde_json** — Configuration serialization
-- **[image](https://crates.io/crates/image)** — Custom icon loading (PNG)
-- **[windows](https://crates.io/crates/windows)** — Win32 API for icon extraction
+- **[auto-launch](https://crates.io/crates/auto-launch)** — Start with Windows
+- **[windows](https://crates.io/crates/windows)** — Shell icon extraction and launching
+- **[image](https://crates.io/crates/image)** — Custom icon decoding (PNG, ICO, JPG, BMP)
 - **[rfd](https://crates.io/crates/rfd)** — Native file dialogs
-- **[crossbeam](https://crates.io/crates/crossbeam)** — Channel-based event passing
+- **[serde](https://serde.rs) / serde_json** — Configuration serialization
 
 ## License
 

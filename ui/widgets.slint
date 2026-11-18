@@ -1,0 +1,557 @@
+// Reusable building blocks (shared design with HushKey). Everything is drawn with Slint
+// primitives (no icon fonts, no image assets) so it renders identically everywhere.
+
+import { Theme } from "theme.slint";
+
+// ── Glyphs ────────────────────────────────────────────────────────────────────
+// 24×24 stroke icons. Each one has a constant path so the compiler validates it.
+
+component Glyph inherits Path {
+    viewbox-width: 24;
+    viewbox-height: 24;
+    width: 18px;
+    height: 18px;
+    stroke: Theme.text-muted;
+    stroke-width: 1.8px;
+    fill: transparent;
+}
+
+export component SearchGlyph inherits Glyph {
+    commands: "M11 4a7 7 0 1 1 0 14a7 7 0 1 1 0-14z M16.2 16.2L20.5 20.5";
+}
+
+export component PlusGlyph inherits Glyph {
+    commands: "M12 5v14 M5 12h14";
+}
+
+export component GearGlyph inherits Glyph {
+    commands: "M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z M15 12a3 3 0 1 1-6 0a3 3 0 1 1 6 0z";
+}
+
+export component BackGlyph inherits Glyph {
+    commands: "M15 5l-7 7 7 7";
+}
+
+export component ChevronGlyph inherits Glyph {
+    commands: "M9 5l7 7-7 7";
+}
+
+export component CloseGlyph inherits Glyph {
+    commands: "M6.5 6.5l11 11 M17.5 6.5l-11 11";
+}
+
+export component FolderGlyph inherits Glyph {
+    commands: "M3.5 7.5a2 2 0 0 1 2-2h4l2 2.5h7a2 2 0 0 1 2 2v7.5a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z";
+}
+
+export component AppGlyph inherits Glyph {
+    commands: "M4 6.5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2h-12a2 2 0 0 1-2-2z M4 9h16";
+}
+
+export component GroupGlyph inherits Glyph {
+    commands: "M5 4.5h4.5a.5 .5 0 0 1 .5 .5v4.5a.5 .5 0 0 1-.5 .5h-4.5a.5 .5 0 0 1-.5-.5v-4.5a.5 .5 0 0 1 .5-.5z M14.5 4.5h4.5a.5 .5 0 0 1 .5 .5v4.5a.5 .5 0 0 1-.5 .5h-4.5a.5 .5 0 0 1-.5-.5v-4.5a.5 .5 0 0 1 .5-.5z M5 14h4.5a.5 .5 0 0 1 .5 .5v4.5a.5 .5 0 0 1-.5 .5h-4.5a.5 .5 0 0 1-.5-.5v-4.5a.5 .5 0 0 1 .5-.5z M14.5 14h4.5a.5 .5 0 0 1 .5 .5v4.5a.5 .5 0 0 1-.5 .5h-4.5a.5 .5 0 0 1-.5-.5v-4.5a.5 .5 0 0 1 .5-.5z";
+}
+
+export component OpenGlyph inherits Glyph {
+    commands: "M14 4.5h5.5v5.5 M19.5 4.5l-8 8 M17.5 13.5v4.5a1.5 1.5 0 0 1-1.5 1.5h-10a1.5 1.5 0 0 1-1.5-1.5v-10a1.5 1.5 0 0 1 1.5-1.5h4.5";
+}
+
+export component PencilGlyph inherits Glyph {
+    commands: "M4.5 19.5h4l10-10-4-4-10 10z M13 7l4 4";
+}
+
+export component ImageGlyph inherits Glyph {
+    commands: "M4 6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-12a2 2 0 0 1-2-2z M4.5 16.5l4.5-4.5 3.5 3.5 2.5-2.5 4.5 4.5 M14 8.5a1.5 1.5 0 1 0 3 0a1.5 1.5 0 1 0-3 0z";
+}
+
+export component ResetGlyph inherits Glyph {
+    commands: "M5 9.5h9.5a4.5 4.5 0 0 1 0 9h-5 M8.5 6l-3.5 3.5 3.5 3.5";
+}
+
+export component MoveInGlyph inherits Glyph {
+    commands: "M3.5 7.5a2 2 0 0 1 2-2h4l2 2.5h7a2 2 0 0 1 2 2v7.5a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z M8.5 14h6.5 M12.5 11.5l2.5 2.5-2.5 2.5";
+}
+
+export component MoveOutGlyph inherits Glyph {
+    commands: "M12 15V4.5 M8 8.5l4-4 4 4 M5 13v5a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-5";
+}
+
+export component TrashGlyph inherits Glyph {
+    commands: "M4.5 7h15 M9.5 7V5.5a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1V7 M6.5 7l.9 11.6a1.5 1.5 0 0 0 1.5 1.4h6.2a1.5 1.5 0 0 0 1.5-1.4L17.5 7 M10.25 10.5v6 M13.75 10.5v6";
+}
+
+export component WarningGlyph inherits Glyph {
+    commands: "M12 4.5l8.5 15h-17z M12 10v4 M12 16.8v.4";
+}
+
+export component CheckGlyph inherits Glyph {
+    commands: "M5 12.5l4.5 4.5 9.5-9.5";
+}
+
+export component KeyboardGlyph inherits Glyph {
+    commands: "M3.5 7a1.5 1.5 0 0 1 1.5-1.5h14a1.5 1.5 0 0 1 1.5 1.5v10a1.5 1.5 0 0 1-1.5 1.5h-14a1.5 1.5 0 0 1-1.5-1.5z M7 9.5h.01 M10.5 9.5h.01 M14 9.5h.01 M17 9.5h.01 M7 12.5h.01 M17 12.5h.01 M10.5 12.5h3 M8 15.5h8";
+}
+
+export component SunGlyph inherits Glyph {
+    commands: "M16 12a4 4 0 1 1-8 0a4 4 0 1 1 8 0z M12 2.5v2 M12 19.5v2 M2.5 12h2 M19.5 12h2 M5.3 5.3l1.4 1.4 M17.3 17.3l1.4 1.4 M5.3 18.7l1.4-1.4 M17.3 6.7l1.4-1.4";
+}
+
+// ── Controls ──────────────────────────────────────────────────────────────────
+
+export component IconButton inherits Rectangle {
+    callback clicked;
+    in property <string> tooltip;
+    in property <bool> active;
+    width: 34px;
+    height: 34px;
+    border-radius: 9px;
+    background: active ? Theme.accent-soft : (touch.has-hover ? Theme.surface-hover : transparent);
+    animate background { duration: Theme.fast; }
+    accessible-role: button;
+    accessible-label: tooltip;
+    accessible-action-default => { root.clicked(); }
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+    @children
+}
+
+export component Button inherits Rectangle {
+    in property <string> text;
+    in property <bool> primary;
+    in property <bool> danger;
+    in property <bool> enabled: true;
+    callback clicked;
+
+    height: 32px;
+    min-width: 76px;
+    border-radius: 8px;
+    border-width: primary || danger ? 0 : 1px;
+    border-color: Theme.border-strong;
+    background: !enabled ? Theme.surface-sunken
+        : primary ? (touch.pressed ? Theme.accent-strong : touch.has-hover ? Theme.accent-strong : Theme.accent)
+        : danger ? (touch.has-hover ? Theme.danger : Theme.danger-soft)
+        : (touch.has-hover ? Theme.surface-hover : Theme.surface);
+    opacity: enabled ? 1 : 0.55;
+    animate background { duration: Theme.fast; }
+    accessible-role: button;
+    accessible-label: text;
+    accessible-action-default => { if (root.enabled) { root.clicked(); } }
+
+    HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 14px;
+        Text {
+            text: root.text;
+            font-size: 12.5px;
+            font-weight: 600;
+            color: root.primary ? Theme.on-accent : root.danger ? (touch.has-hover ? white : Theme.danger) : Theme.text;
+            vertical-alignment: center;
+            horizontal-alignment: center;
+        }
+    }
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+// Single-line text field. `leading` shows a search glyph.
+export component TextField inherits Rectangle {
+    in-out property <string> text;
+    in property <string> placeholder;
+    in property <bool> leading;
+    in property <length> field-font-size: 13px;
+    out property <bool> has-focus: input.has-focus;
+    callback edited(string);
+    callback accepted(string);
+
+    public function focus-input() { input.focus(); }
+    public function select-all() { input.select-all(); }
+
+    height: 36px;
+    border-radius: 10px;
+    background: Theme.surface-sunken;
+    border-width: 1px;
+    border-color: input.has-focus ? Theme.accent : Theme.border;
+    animate border-color { duration: Theme.fast; }
+
+    HorizontalLayout {
+        padding-left: root.leading ? 10px : 12px;
+        padding-right: 6px;
+        spacing: 8px;
+        if root.leading: VerticalLayout {
+            alignment: center;
+            SearchGlyph { width: 16px; height: 16px; stroke: input.has-focus ? Theme.accent : Theme.text-faint; }
+        }
+        Rectangle {
+            horizontal-stretch: 1;
+            if root.text == "": Text {
+                width: 100%;
+                height: 100%;
+                text: root.placeholder;
+                color: Theme.text-faint;
+                font-size: root.field-font-size;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+            input := TextInput {
+                width: 100%;
+                height: 100%;
+                text <=> root.text;
+                single-line: true;
+                vertical-alignment: center;
+                color: Theme.text;
+                font-size: root.field-font-size;
+                selection-background-color: Theme.accent;
+                selection-foreground-color: Theme.on-accent;
+                accessible-label: root.placeholder;
+                edited => { root.edited(self.text); }
+                accepted => { root.accepted(self.text); }
+            }
+        }
+        @children
+    }
+}
+
+export component Tabs inherits Rectangle {
+    in property <[string]> items;
+    in-out property <int> selected;
+    callback picked(int);
+    height: 32px;
+    border-radius: 10px;
+    background: Theme.surface-sunken;
+    HorizontalLayout {
+        padding: 3px;
+        spacing: 2px;
+        for item[i] in root.items: Rectangle {
+            border-radius: 7px;
+            background: i == root.selected ? Theme.surface : transparent;
+            drop-shadow-blur: i == root.selected ? 4px : 0;
+            drop-shadow-color: #0000001f;
+            animate background { duration: Theme.fast; }
+            accessible-role: tab;
+            accessible-label: item;
+            accessible-action-default => { root.selected = i; root.picked(i); }
+            HorizontalLayout {
+                padding-left: 12px;
+                padding-right: 12px;
+                Text {
+                    text: item;
+                    font-size: 12.5px;
+                    font-weight: i == root.selected ? 600 : 500;
+                    color: i == root.selected ? Theme.text : Theme.text-muted;
+                    vertical-alignment: center;
+                    horizontal-alignment: center;
+                }
+            }
+            TouchArea {
+                mouse-cursor: pointer;
+                clicked => { root.selected = i; root.picked(i); }
+            }
+        }
+    }
+}
+
+export component Switch inherits Rectangle {
+    in-out property <bool> checked;
+    in property <string> label;
+    callback toggled(bool);
+    width: 40px;
+    height: 23px;
+    border-radius: self.height / 2;
+    background: checked ? Theme.accent : Theme.border-strong;
+    animate background { duration: Theme.fast; }
+    accessible-role: switch;
+    accessible-checkable: true;
+    accessible-checked: checked;
+    accessible-label: label;
+    accessible-action-default => { touch.clicked(); }
+    Rectangle {
+        width: parent.height - 6px;
+        height: self.width;
+        y: 3px;
+        x: root.checked ? parent.width - self.width - 3px : 3px;
+        border-radius: self.width / 2;
+        background: white;
+        drop-shadow-blur: 3px;
+        drop-shadow-color: #00000040;
+        animate x { duration: 160ms; easing: ease-out; }
+    }
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.checked = !root.checked;
+            root.toggled(root.checked);
+        }
+    }
+}
+
+// Click → "Press keys…" → shows the captured combo. × clears it.
+export component ShortcutChip inherits Rectangle {
+    in property <string> shortcut;
+    in property <bool> capturing;
+    in property <string> placeholder: "Set shortcut";
+    in property <string> label;
+    callback clicked;
+    callback cleared;
+
+    property <bool> blink;
+    property <bool> bound: shortcut != "";
+
+    height: 32px;
+    min-width: 140px;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: capturing ? Theme.accent : (bound ? Theme.border-strong : Theme.border);
+    background: capturing ? Theme.accent-soft : (bound ? Theme.surface-sunken : (touch.has-hover ? Theme.surface-hover : transparent));
+    animate background, border-color { duration: Theme.fast; }
+
+    accessible-role: button;
+    accessible-label: label + ": " + (capturing ? "press a key combination" : (bound ? shortcut : "not set"));
+    accessible-action-default => { root.clicked(); }
+
+    Timer {
+        interval: 450ms;
+        running: root.capturing;
+        triggered => { root.blink = !root.blink; }
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: root.bound && !root.capturing ? 4px : 10px;
+        spacing: 6px;
+        if root.capturing: Rectangle {
+            width: 7px;
+            height: 7px;
+            y: (parent.height - self.height) / 2;
+            border-radius: 3.5px;
+            background: Theme.accent;
+            opacity: root.blink ? 0.25 : 1;
+            animate opacity { duration: 200ms; }
+        }
+        Text {
+            text: root.capturing ? "Press keys…" : (root.bound ? root.shortcut : root.placeholder);
+            font-size: 12px;
+            font-weight: root.bound && !root.capturing ? 600 : 500;
+            color: root.capturing ? Theme.accent : (root.bound ? Theme.text : Theme.text-muted);
+            vertical-alignment: center;
+            horizontal-alignment: center;
+            horizontal-stretch: 1;
+            overflow: elide;
+        }
+        if root.bound && !root.capturing: Rectangle {
+            width: 24px;
+            height: 24px;
+            y: (parent.height - self.height) / 2;
+            border-radius: 6px;
+            background: clear.has-hover ? Theme.border : transparent;
+            accessible-role: button;
+            accessible-label: "Clear shortcut";
+            accessible-action-default => { root.cleared(); }
+            CloseGlyph { width: 13px; height: 13px; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; }
+            clear := TouchArea {
+                mouse-cursor: pointer;
+                clicked => { root.cleared(); }
+            }
+        }
+    }
+}
+
+export component SettingRow inherits Rectangle {
+    in property <string> title;
+    in property <string> subtitle;
+    min-height: 58px;
+    HorizontalLayout {
+        padding-left: 16px;
+        padding-right: 16px;
+        padding-top: 10px;
+        padding-bottom: 10px;
+        spacing: 12px;
+        VerticalLayout {
+            alignment: center;
+            spacing: 2px;
+            horizontal-stretch: 1;
+            Text { text: root.title; font-size: 13.5px; font-weight: 600; color: Theme.text; }
+            if root.subtitle != "": Text {
+                text: root.subtitle;
+                font-size: 12px;
+                color: Theme.text-muted;
+                wrap: word-wrap;
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            @children
+        }
+    }
+}
+
+export component Card inherits Rectangle {
+    background: Theme.surface;
+    border-radius: Theme.radius;
+    border-width: 1px;
+    border-color: Theme.border;
+    @children
+}
+
+export component Divider inherits Rectangle {
+    height: 1px;
+    background: Theme.border;
+}
+
+export component SectionLabel inherits Text {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.8px;
+    color: Theme.text-faint;
+}
+
+// Horizontal slider snapping to `step`. The knob follows the pointer locally while
+// dragging so updates from Rust never make it jump.
+export component Slider inherits Rectangle {
+    in property <float> value;
+    in property <float> minimum: 0;
+    in property <float> maximum: 1;
+    in property <float> step: 1;
+    in property <string> label;
+    callback moved(float);
+
+    property <float> drag-value;
+    property <float> shown: touch.pressed ? drag-value : clamp(value, minimum, maximum);
+    property <float> frac: (root.shown - root.minimum) / max(0.0001, root.maximum - root.minimum);
+    property <length> knob: 16px;
+
+    height: 24px;
+    min-width: 120px;
+
+    accessible-role: slider;
+    accessible-label: label;
+    accessible-value: round(root.shown);
+    accessible-value-minimum: minimum;
+    accessible-value-maximum: maximum;
+    accessible-value-step: step;
+    accessible-action-increment => { root.moved(min(root.maximum, root.value + root.step)); }
+    accessible-action-decrement => { root.moved(max(root.minimum, root.value - root.step)); }
+
+    function set-from(x: length) {
+        root.drag-value = root.minimum + round(clamp((x - root.knob / 2) / max(1px, root.width - root.knob), 0, 1) * (root.maximum - root.minimum) / root.step) * root.step;
+        root.moved(root.drag-value);
+    }
+
+    Rectangle {
+        y: (parent.height - 4px) / 2;
+        height: 4px;
+        border-radius: 2px;
+        background: Theme.border-strong;
+    }
+    Rectangle {
+        x: 0;
+        y: (parent.height - 4px) / 2;
+        height: 4px;
+        width: (root.width - root.knob) * root.frac + root.knob / 2;
+        border-radius: 2px;
+        background: Theme.accent;
+    }
+    Rectangle {
+        x: (root.width - root.knob) * root.frac;
+        y: (parent.height - root.knob) / 2;
+        width: root.knob;
+        height: root.knob;
+        border-radius: root.knob / 2;
+        background: white;
+        border-width: 1px;
+        border-color: touch.has-hover || touch.pressed ? Theme.accent : Theme.border-strong;
+        drop-shadow-blur: 3px;
+        drop-shadow-color: #00000040;
+    }
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        pointer-event(e) => {
+            if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) {
+                root.set-from(self.mouse-x);
+            }
+        }
+        moved => {
+            if (self.pressed) {
+                root.set-from(self.mouse-x);
+            }
+        }
+    }
+}
+
+// One row in a popup menu: a glyph slot, a label, optional hint on the right.
+export component MenuEntry inherits Rectangle {
+    in property <string> text;
+    in property <string> hint;
+    in property <bool> danger;
+    callback clicked;
+
+    height: 32px;
+    border-radius: 7px;
+    background: touch.has-hover ? (danger ? Theme.danger-soft : Theme.surface-hover) : transparent;
+    accessible-role: button;
+    accessible-label: text;
+    accessible-action-default => { root.clicked(); }
+
+    HorizontalLayout {
+        padding-left: 9px;
+        padding-right: 12px;
+        spacing: 10px;
+        VerticalLayout {
+            width: 17px;
+            alignment: center;
+            @children
+        }
+        Text {
+            text: root.text;
+            font-size: 12.5px;
+            color: root.danger ? Theme.danger : Theme.text;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            overflow: elide;
+        }
+        if root.hint != "": Text {
+            text: root.hint;
+            font-size: 11.5px;
+            color: Theme.text-faint;
+            vertical-alignment: center;
+        }
+    }
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+export component MenuSeparator inherits Rectangle {
+    height: 9px;
+    Rectangle {
+        y: 4px;
+        height: 1px;
+        background: Theme.border;
+    }
+}
+
+// Rounded popup panel used by menus.
+export component MenuPanel inherits Rectangle {
+    background: Theme.surface;
+    border-radius: 11px;
+    border-width: 1px;
+    border-color: Theme.border-strong;
+    drop-shadow-blur: 18px;
+    drop-shadow-offset-y: 6px;
+    drop-shadow-color: #00000066;
+    VerticalLayout {
+        padding: 5px;
+        spacing: 1px;
+        @children
+    }
+}

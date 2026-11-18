@@ -1,0 +1,459 @@
+// Settings live in their own window, not as a panel over the launcher.
+
+import { ScrollView, Palette } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import {
+    KeyboardGlyph, CheckGlyph, FolderGlyph, Tabs, Switch, ShortcutChip, SettingRow, Card, Divider, SectionLabel,
+    Slider, Button
+} from "widgets.slint";
+
+export struct ThemeOption {
+    name: string,
+    bg: color,
+    surface: color,
+    accent: color,
+    text: color,
+    custom: bool,
+}
+
+component ThemeRow inherits Rectangle {
+    in property <ThemeOption> option;
+    in property <bool> current;
+    callback picked();
+    height: 52px;
+    background: touch.has-hover ? Theme.surface-hover : transparent;
+    accessible-role: button;
+    accessible-label: root.option.name + " theme";
+    accessible-action-default => { root.picked(); }
+    HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 16px;
+        spacing: 12px;
+        // Mini window preview: background, a tile and the accent.
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 46px;
+                height: 32px;
+                border-radius: 8px;
+                background: root.option.bg;
+                border-width: 1px;
+                border-color: root.current ? Theme.accent : Theme.border-strong;
+                Rectangle {
+                    x: 6px;
+                    y: 6px;
+                    width: 15px;
+                    height: 15px;
+                    border-radius: 4px;
+                    background: root.option.surface;
+                }
+                Rectangle {
+                    x: 25px;
+                    y: 6px;
+                    width: 15px;
+                    height: 15px;
+                    border-radius: 4px;
+                    background: root.option.accent;
+                }
+                Rectangle {
+                    x: 6px;
+                    y: 24px;
+                    width: 26px;
+                    height: 3px;
+                    border-radius: 1.5px;
+                    background: root.option.text;
+                    opacity: 0.7;
+                }
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            spacing: 1px;
+            horizontal-stretch: 1;
+            Text {
+                text: root.option.name;
+                font-size: 13px;
+                font-weight: root.current ? 700 : 500;
+                color: Theme.text;
+            }
+            if root.option.custom: Text {
+                text: "Custom theme from config.json";
+                font-size: 11px;
+                color: Theme.text-faint;
+            }
+        }
+        if root.current: VerticalLayout {
+            alignment: center;
+            CheckGlyph { stroke: Theme.accent; stroke-width: 2.2px; }
+        }
+    }
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.picked(); }
+    }
+}
+
+export component SettingsWindow inherits Window {
+    title: "Launchpad Settings";
+    icon: root.app-icon;
+    preferred-width: 540px;
+    preferred-height: 620px;
+    min-width: 440px;
+    min-height: 420px;
+    background: Theme.bg;
+    default-font-size: 13px;
+
+    in property <bool> dark: true;
+    in property <image> app-icon;
+    in-out property <int> page;
+
+    in property <string> hotkey;           // display label, "" when unset
+    in property <bool> capturing;
+    in property <string> hotkey-note;      // error or hint under the shortcut
+    in property <bool> hotkey-note-is-error;
+    in property <bool> hotkey-on-release;
+    in property <bool> hide-on-launch;
+    in property <bool> keep-on-top;
+    in property <bool> close-to-tray;
+    in property <bool> auto-start;
+
+    in property <[ThemeOption]> themes;
+    in property <int> theme-index;
+    in property <float> icon-size;
+    in property <float> spacing;
+    in property <bool> auto-fit;
+
+    in property <string> version;
+    in property <string> config-path;
+    in property <bool> portable;
+
+    callback start-capture();
+    callback key-captured(string, bool, bool, bool, bool);
+    callback cancel-capture();
+    callback clear-hotkey();
+    callback set-flag(string, bool);
+    callback pick-theme(int);
+    callback set-icon-size(float);
+    callback set-spacing(float);
+    callback open-config-dir();
+    callback open-url(string);
+
+    init => {
+        Palette.color-scheme = root.dark ? ColorScheme.dark : ColorScheme.light;
+    }
+    changed dark => {
+        Palette.color-scheme = root.dark ? ColorScheme.dark : ColorScheme.light;
+    }
+
+    function begin-capture() {
+        if (root.capturing) {
+            root.cancel-capture();
+        } else {
+            root.start-capture();
+            key-sink.focus();
+        }
+    }
+
+    // Receives the key combo while the shortcut chip is recording.
+    key-sink := FocusScope {
+        key-pressed(event) => {
+            if (root.capturing) {
+                root.key-captured(event.text, event.modifiers.control, event.modifiers.alt, event.modifiers.shift, event.modifiers.meta);
+                return accept;
+            }
+            return reject;
+        }
+
+        VerticalLayout {
+            HorizontalLayout {
+                padding-left: 18px;
+                padding-right: 16px;
+                padding-top: 14px;
+                padding-bottom: 10px;
+                spacing: 10px;
+                VerticalLayout {
+                    alignment: center;
+                    Image { source: root.app-icon; width: 24px; height: 24px; }
+                }
+                Text {
+                    text: "Settings";
+                    font-size: 17px;
+                    font-weight: 750;
+                    color: Theme.text;
+                    vertical-alignment: center;
+                }
+                Rectangle { horizontal-stretch: 1; }
+                VerticalLayout {
+                    alignment: center;
+                    Tabs {
+                        items: ["General", "Appearance", "About"];
+                        selected <=> root.page;
+                    }
+                }
+            }
+
+            ScrollView {
+                vertical-stretch: 1;
+                VerticalLayout {
+                    padding-left: 16px;
+                    padding-right: 16px;
+                    padding-top: 4px;
+                    padding-bottom: 18px;
+                    spacing: 10px;
+                    alignment: start;
+
+                    // ── General ──
+                    if root.page == 0: VerticalLayout {
+                        spacing: 10px;
+                        SectionLabel { text: "SHORTCUT"; }
+                        Card {
+                            VerticalLayout {
+                                SettingRow {
+                                    title: "Show / hide Launchpad";
+                                    subtitle: "Works from anywhere. Click, then press the keys you want.";
+                                    ShortcutChip {
+                                        shortcut: root.hotkey;
+                                        capturing: root.capturing;
+                                        placeholder: "Not set";
+                                        label: "Show or hide shortcut";
+                                        clicked => { root.begin-capture(); }
+                                        cleared => { root.clear-hotkey(); }
+                                    }
+                                }
+                                if root.hotkey-note != "": HorizontalLayout {
+                                    padding-left: 16px;
+                                    padding-right: 16px;
+                                    padding-bottom: 12px;
+                                    spacing: 8px;
+                                    VerticalLayout {
+                                        alignment: start;
+                                        KeyboardGlyph {
+                                            width: 15px;
+                                            height: 15px;
+                                            stroke: root.hotkey-note-is-error ? Theme.danger : Theme.accent;
+                                        }
+                                    }
+                                    Text {
+                                        text: root.hotkey-note;
+                                        font-size: 12px;
+                                        color: root.hotkey-note-is-error ? Theme.danger : Theme.accent;
+                                        wrap: word-wrap;
+                                        horizontal-stretch: 1;
+                                    }
+                                }
+                                Divider { }
+                                SettingRow {
+                                    title: "Trigger on key release";
+                                    subtitle: "Open when the keys are let go, so the key-up doesn't reach the window underneath.";
+                                    Switch {
+                                        label: "Trigger on key release";
+                                        checked: root.hotkey-on-release;
+                                        toggled(v) => { root.set-flag("hotkey-on-release", v); }
+                                    }
+                                }
+                            }
+                        }
+
+                        SectionLabel { text: "BEHAVIOUR"; }
+                        Card {
+                            VerticalLayout {
+                                SettingRow {
+                                    title: "Hide after launching";
+                                    subtitle: "Get out of the way once an app or folder opens.";
+                                    Switch {
+                                        label: "Hide after launching";
+                                        checked: root.hide-on-launch;
+                                        toggled(v) => { root.set-flag("hide-on-launch", v); }
+                                    }
+                                }
+                                Divider { }
+                                SettingRow {
+                                    title: "Keep on top";
+                                    subtitle: "Stay above other windows while open.";
+                                    Switch {
+                                        label: "Keep on top";
+                                        checked: root.keep-on-top;
+                                        toggled(v) => { root.set-flag("keep-on-top", v); }
+                                    }
+                                }
+                                Divider { }
+                                SettingRow {
+                                    title: "Close to tray";
+                                    subtitle: "The window's close button hides Launchpad instead of quitting. Quit from the tray icon.";
+                                    Switch {
+                                        label: "Close to tray";
+                                        checked: root.close-to-tray;
+                                        toggled(v) => { root.set-flag("close-to-tray", v); }
+                                    }
+                                }
+                                Divider { }
+                                SettingRow {
+                                    title: "Start with Windows";
+                                    subtitle: "Launch in the tray when you sign in.";
+                                    Switch {
+                                        label: "Start with Windows";
+                                        checked: root.auto-start;
+                                        toggled(v) => { root.set-flag("auto-start", v); }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // ── Appearance ──
+                    if root.page == 1: VerticalLayout {
+                        spacing: 10px;
+                        SectionLabel { text: "THEME"; }
+                        Card {
+                            clip: true;
+                            VerticalLayout {
+                                for option[i] in root.themes: VerticalLayout {
+                                    if i > 0: Divider { }
+                                    ThemeRow {
+                                        option: option;
+                                        current: i == root.theme-index;
+                                        picked => { root.pick-theme(i); }
+                                    }
+                                }
+                            }
+                        }
+
+                        SectionLabel { text: "LAYOUT"; }
+                        Card {
+                            VerticalLayout {
+                                SettingRow {
+                                    title: "Fit icons to window";
+                                    subtitle: "Size icons so every item fits without scrolling.";
+                                    Switch {
+                                        label: "Fit icons to window";
+                                        checked: root.auto-fit;
+                                        toggled(v) => { root.set-flag("auto-fit", v); }
+                                    }
+                                }
+                                Divider { }
+                                VerticalLayout {
+                                    padding: 16px;
+                                    spacing: 10px;
+                                    opacity: root.auto-fit ? 0.45 : 1;
+                                    HorizontalLayout {
+                                        Text { text: "Icon size"; font-size: 13.5px; font-weight: 600; color: Theme.text; horizontal-stretch: 1; }
+                                        Text { text: root.auto-fit ? "Automatic" : round(root.icon-size) + " px"; font-size: 12px; color: Theme.text-muted; }
+                                    }
+                                    Slider {
+                                        label: "Icon size";
+                                        minimum: 32;
+                                        maximum: 128;
+                                        step: 4;
+                                        value: root.icon-size;
+                                        moved(v) => { root.set-icon-size(v); }
+                                    }
+                                }
+                                Divider { }
+                                VerticalLayout {
+                                    padding: 16px;
+                                    spacing: 10px;
+                                    HorizontalLayout {
+                                        Text { text: "Spacing"; font-size: 13.5px; font-weight: 600; color: Theme.text; horizontal-stretch: 1; }
+                                        Text { text: round(root.spacing) + " px"; font-size: 12px; color: Theme.text-muted; }
+                                    }
+                                    Slider {
+                                        label: "Spacing";
+                                        minimum: 0;
+                                        maximum: 40;
+                                        step: 2;
+                                        value: root.spacing;
+                                        moved(v) => { root.set-spacing(v); }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // ── About ──
+                    if root.page == 2: VerticalLayout {
+                        spacing: 10px;
+                        Card {
+                            VerticalLayout {
+                                padding: 16px;
+                                spacing: 8px;
+                                HorizontalLayout {
+                                    spacing: 12px;
+                                    alignment: start;
+                                    Image { source: root.app-icon; width: 40px; height: 40px; }
+                                    VerticalLayout {
+                                        alignment: center;
+                                        spacing: 2px;
+                                        HorizontalLayout {
+                                            spacing: 6px;
+                                            alignment: start;
+                                            Text { text: "Launchpad " + root.version; font-size: 15px; font-weight: 700; color: Theme.text; vertical-alignment: center; }
+                                            Text { text: "by X4Lo"; font-size: 12.5px; color: Theme.text-muted; vertical-alignment: center; }
+                                        }
+                                        Text { text: "A fast, lightweight app launcher"; font-size: 12px; color: Theme.text-muted; }
+                                    }
+                                }
+                                Divider { }
+                                Text {
+                                    text: (root.portable ? "Portable mode · " : "Standard mode · ") + "settings file:";
+                                    font-size: 12px;
+                                    color: Theme.text-muted;
+                                }
+                                Text {
+                                    text: root.config-path;
+                                    font-size: 12px;
+                                    color: Theme.text;
+                                    wrap: word-wrap;
+                                }
+                                HorizontalLayout {
+                                    alignment: start;
+                                    padding-top: 4px;
+                                    spacing: 8px;
+                                    Button {
+                                        text: "GitHub ↗";
+                                        clicked => { root.open-url("https://github.com/X4Lo/LaunchPad"); }
+                                    }
+                                    Button {
+                                        text: "Open settings folder";
+                                        clicked => { root.open-config-dir(); }
+                                    }
+                                }
+                                Text {
+                                    text: "github.com/X4Lo/LaunchPad · MIT License";
+                                    font-size: 11px;
+                                    color: Theme.text-faint;
+                                }
+                            }
+                        }
+                        SectionLabel { text: "KEYBOARD"; }
+                        Card {
+                            VerticalLayout {
+                                padding: 16px;
+                                spacing: 6px;
+                                for row in [
+                                    { k: "Type", v: "Search everything" },
+                                    { k: "Arrows · Enter", v: "Move the selection · open it" },
+                                    { k: "Esc", v: "Clear search, leave a group, then hide" },
+                                    { k: "Backspace", v: "Leave a group" },
+                                    { k: "Mouse back · forward", v: "Leave a group · go back into it" },
+                                    { k: "Shift + F10", v: "Menu for the selected item" },
+                                    { k: "F2 · Del", v: "Rename · remove the selected item" },
+                                    { k: "Ctrl + ,", v: "Open these settings" },
+                                ]: HorizontalLayout {
+                                    spacing: 12px;
+                                    Text { width: 140px; text: row.k; font-size: 12px; font-weight: 600; color: Theme.text; }
+                                    Text { text: row.v; font-size: 12px; color: Theme.text-muted; wrap: word-wrap; horizontal-stretch: 1; }
+                                }
+                            }
+                        }
+                        Text {
+                            text: "Built with Slint (slint.dev) under its royalty-free license.";
+                            font-size: 11px;
+                            color: Theme.text-faint;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

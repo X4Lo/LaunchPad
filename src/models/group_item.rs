@@ -24,11 +24,6 @@ pub struct GroupItem {
 
 impl GroupItem {
     pub fn new(title: String) -> Self {
-        Self {
-            id: ItemId::new(),
-            title,
-            icon_path: None,
-            items: Vec::new(),
-        }
+        Self { id: ItemId::new(), title, icon_path: None, items: Vec::new() }
     }
 }

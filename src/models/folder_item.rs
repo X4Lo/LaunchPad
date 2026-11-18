@@ -20,11 +20,6 @@ pub struct FolderItem {
 
 impl FolderItem {
     pub fn new(title: String, folder_path: PathBuf) -> Self {
-        Self {
-            id: ItemId::new(),
-            title,
-            icon_path: None,
-            folder_path,
-        }
+        Self { id: ItemId::new(), title, icon_path: None, folder_path }
     }
 }
